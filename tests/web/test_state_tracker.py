@@ -69,3 +69,17 @@ def test_signal_action_map_covers_all_five():
     assert SIGNAL_ACTION_MAP["Hold"] == "HOLD"
     assert SIGNAL_ACTION_MAP["Underweight"] == "SELL"
     assert SIGNAL_ACTION_MAP["Sell"] == "SELL"
+
+
+def test_trader_branch_marks_trader_completed_and_aggressive_in_progress():
+    tracker = make_tracker(["market"])
+    events = process_chunk(tracker, {"trader_investment_plan": "Trade plan: buy 20%"})
+    status_map = {}
+    for e in events:
+        if e["type"] == "agent_status":
+            status_map[e["data"]["agent"]] = e["data"]["status"]
+    section_events = [e for e in events if e["type"] == "report_section"
+                      and e["data"]["section"] == "trader_investment_plan"]
+    assert len(section_events) == 1
+    assert status_map.get("Trader") == "completed"
+    assert status_map.get("Aggressive Analyst") == "in_progress"
