@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import hmac
 import os
 import re
 import sys
@@ -16,7 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(_REPO_ROOT / ".env")
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
@@ -55,6 +56,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Optional access gate. When TRADINGAGENTS_WEB_PASSWORD is set, POST /api/analyze
+# (the only endpoint that spends LLM budget) requires a matching X-Access-Password
+# header. Empty/unset = no gate (local dev). The gate is enforced server-side
+# because a client-side check would be trivially bypassed by calling the API
+# directly. /api/stream and /api/report need a job_id that only a successful
+# (authorized) /api/analyze hands out, so gating analyze gates the whole flow.
+WEB_PASSWORD = os.environ.get("TRADINGAGENTS_WEB_PASSWORD", "")
+
+
+def _check_access(supplied: str | None) -> None:
+    if not WEB_PASSWORD:
+        return
+    if not supplied or not hmac.compare_digest(supplied, WEB_PASSWORD):
+        raise HTTPException(status_code=401, detail="访问口令缺失或错误")
+
+
 _VALID_TICKER = re.compile(r"^[A-Za-z0-9.\-]{1,20}$")
 
 
@@ -82,7 +99,11 @@ class AnalyzeRequest(BaseModel):
 
 
 @app.post("/api/analyze")
-def start_analyze(req: AnalyzeRequest):
+def start_analyze(
+    req: AnalyzeRequest,
+    x_access_password: str | None = Header(default=None),
+):
+    _check_access(x_access_password)
     if job_mgr.has_running_job():
         raise HTTPException(status_code=429, detail="当前有分析任务运行中，请稍后再试")
     job_id = job_mgr.create_job()

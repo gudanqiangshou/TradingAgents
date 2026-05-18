@@ -150,3 +150,44 @@ def test_api_routes_take_precedence_over_static_mount(client):
     resp = client.get("/api/report/unknown-id")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "任务不存在或已过期"
+
+
+def test_no_gate_when_password_unset(client):
+    # Default (no TRADINGAGENTS_WEB_PASSWORD): analyze works without a header.
+    from web import app as app_module
+    assert app_module.WEB_PASSWORD == ""
+    with patch("web.app._run_analysis_thread"):
+        resp = client.post("/api/analyze", json={
+            "ticker": "TSLA", "date": "2026-05-18",
+            "analysts": ["market"], "language": "Chinese",
+        })
+    assert resp.status_code == 200
+
+
+def test_gate_rejects_missing_and_wrong_password(client, monkeypatch):
+    from web import app as app_module
+    monkeypatch.setattr(app_module, "WEB_PASSWORD", "s3cret")
+    body = {"ticker": "TSLA", "date": "2026-05-18",
+            "analysts": ["market"], "language": "Chinese"}
+    # Missing header
+    r1 = client.post("/api/analyze", json=body)
+    assert r1.status_code == 401
+    assert r1.json()["detail"] == "访问口令缺失或错误"
+    # Wrong password
+    r2 = client.post("/api/analyze", json=body,
+                      headers={"X-Access-Password": "nope"})
+    assert r2.status_code == 401
+    # No job slot consumed by a rejected request
+    assert not app_module.job_mgr.has_running_job()
+
+
+def test_gate_accepts_correct_password(client, monkeypatch):
+    from web import app as app_module
+    monkeypatch.setattr(app_module, "WEB_PASSWORD", "s3cret")
+    with patch("web.app._run_analysis_thread"):
+        resp = client.post("/api/analyze", json={
+            "ticker": "TSLA", "date": "2026-05-18",
+            "analysts": ["market"], "language": "Chinese",
+        }, headers={"X-Access-Password": "s3cret"})
+    assert resp.status_code == 200
+    assert "job_id" in resp.json()

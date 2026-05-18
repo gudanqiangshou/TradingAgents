@@ -52,9 +52,33 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".pill").forEach(btn => {
     btn.addEventListener("click", () => btn.classList.toggle("active"));
   });
+  document.getElementById("auth-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") submitAuth();
+  });
   renderAgentList({});
   showDecisionCard("pending", null);
+  // Show the password gate until the user has entered one this session.
+  // This is UX only — the real enforcement is server-side on /api/analyze.
+  if (!sessionStorage.getItem("ta_pw")) {
+    document.getElementById("auth-overlay").classList.remove("hidden");
+  }
 });
+
+function submitAuth() {
+  const val = document.getElementById("auth-input").value;
+  if (!val) return;
+  sessionStorage.setItem("ta_pw", val);
+  document.getElementById("auth-error").textContent = "";
+  document.getElementById("auth-overlay").classList.add("hidden");
+}
+
+function showAuthGate(message) {
+  sessionStorage.removeItem("ta_pw");
+  const err = document.getElementById("auth-error");
+  if (err) err.textContent = message || "";
+  document.getElementById("auth-input").value = "";
+  document.getElementById("auth-overlay").classList.remove("hidden");
+}
 
 // ---- UI helpers ----
 function setStatus(msg, hint = "") {
@@ -170,12 +194,21 @@ async function startAnalysis() {
   try {
     resp = await fetch(`/api/analyze`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Access-Password": sessionStorage.getItem("ta_pw") || "",
+      },
       body: JSON.stringify({ ticker, date, analysts, language }),
     });
   } catch {
     setStatus("无法连接到分析服务器");
     document.getElementById("submit-btn").disabled = false;
+    return;
+  }
+
+  if (resp.status === 401) {
+    document.getElementById("submit-btn").disabled = false;
+    showAuthGate("口令错误，请重新输入");
     return;
   }
 

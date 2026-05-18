@@ -50,6 +50,17 @@
     <div class="busy-message">当前有分析任务运行中，请稍后再试</div>
   </div>
 
+  <!-- Access Password Gate -->
+  <div id="auth-overlay" class="busy-overlay hidden">
+    <div class="auth-box">
+      <div class="auth-title">需要访问口令</div>
+      <input id="auth-input" class="auth-input" type="password"
+             placeholder="请输入口令" autocomplete="off">
+      <div id="auth-error" class="auth-error"></div>
+      <button id="auth-btn" class="submit-btn" onclick="submitAuth()">进入</button>
+    </div>
+  </div>
+
   <!-- Main Panel -->
   <div class="main-panel">
     <!-- Left: Agent Progress -->

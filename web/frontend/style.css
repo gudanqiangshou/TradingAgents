@@ -66,6 +66,16 @@ html, body { height: 100%; background: var(--bg-base); color: var(--text-primary
   display: flex; align-items: center; justify-content: center; z-index: 100; }
 .busy-message { background: var(--bg-elevated); border: 1px solid var(--amber);
   color: var(--amber); padding: 20px 32px; border-radius: 8px; font-size: 14px; }
+.auth-box { background: var(--bg-elevated); border: 1px solid var(--border-dim);
+  border-radius: 8px; padding: 28px 32px; display: flex; flex-direction: column;
+  gap: 12px; width: 300px; }
+.auth-title { color: var(--text-primary); font-size: 15px; font-weight: 700;
+  text-align: center; }
+.auth-input { background: var(--bg-surface); border: 1px solid var(--border-dim);
+  border-radius: 6px; color: var(--text-primary); font-size: 14px;
+  padding: 10px 12px; outline: none; }
+.auth-input:focus { border-color: var(--accent); }
+.auth-error { color: var(--red); font-size: 11px; min-height: 14px; text-align: center; }
 .hidden { display: none !important; }
 
 /* Main Panel */
