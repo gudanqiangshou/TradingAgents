@@ -1,0 +1,265 @@
+// ---- Config (loaded from config.js) ----
+// BACKEND_URL is injected by config.js before this file loads
+
+// ---- State ----
+const AGENT_TEAMS = [
+  { label: "分析师团队", agents: ["Market Analyst", "Sentiment Analyst", "News Analyst", "Fundamentals Analyst"] },
+  { label: "研究团队",   agents: ["Bull Researcher", "Bear Researcher", "Research Manager"] },
+  { label: "交易/风控/组合", agents: ["Trader", "Aggressive Analyst", "Neutral Analyst", "Conservative Analyst", "Portfolio Manager"] },
+];
+
+const SECTION_LABELS = {
+  market_report: "市场分析报告",
+  sentiment_report: "情绪分析报告",
+  news_report: "新闻分析报告",
+  fundamentals_report: "基本面分析报告",
+  investment_plan: "研究团队决策",
+  trader_investment_plan: "交易员计划",
+  final_trade_decision: "投资组合经理决策",
+};
+
+const SECTION_TEAM = {
+  market_report: "Market Analyst",
+  sentiment_report: "Sentiment Analyst",
+  news_report: "News Analyst",
+  fundamentals_report: "Fundamentals Analyst",
+  investment_plan: "Research Manager",
+  trader_investment_plan: "Trader",
+  final_trade_decision: "Portfolio Manager",
+};
+
+let state = { agentStatus: {}, reportSections: {}, jobId: null, es: null };
+
+// ---- Init ----
+window.addEventListener("DOMContentLoaded", () => {
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById("date-input").value = today;
+  document.querySelectorAll(".pill").forEach(btn => {
+    btn.addEventListener("click", () => btn.classList.toggle("active"));
+  });
+  renderAgentList({});
+  showDecisionCard("pending", null);
+});
+
+// ---- UI helpers ----
+function setStatus(msg, hint = "") {
+  document.getElementById("status-text").textContent = msg;
+  document.getElementById("status-hint").textContent = hint;
+}
+
+function toggleProgress() {
+  const body = document.getElementById("progress-body");
+  const btn = document.getElementById("collapse-btn");
+  body.classList.toggle("collapsed");
+  btn.textContent = body.classList.contains("collapsed") ? "▸" : "▾";
+}
+
+function renderAgentList(agentStatus) {
+  const list = document.getElementById("agent-list");
+  list.innerHTML = "";
+  let total = 0, completed = 0;
+  AGENT_TEAMS.forEach(team => {
+    const visible = team.agents.filter(a => a in agentStatus || Object.keys(agentStatus).length === 0);
+    if (visible.length === 0) return;
+    const label = document.createElement("div");
+    label.className = "agent-team-label";
+    label.textContent = team.label;
+    list.appendChild(label);
+    team.agents.forEach(agent => {
+      if (!(agent in agentStatus) && Object.keys(agentStatus).length > 0) return;
+      const status = agentStatus[agent] || "pending";
+      total++;
+      if (status === "completed") completed++;
+      const item = document.createElement("div");
+      item.className = `agent-item ${status}`;
+      item.id = `agent-${agent.replace(/ /g, "-")}`;
+      item.innerHTML = `
+        <span class="agent-dot ${status}"></span>
+        <span class="agent-name ${status}">${agent}</span>
+        ${status === "completed" ? '<span class="agent-check">✓</span>' : ""}
+        ${status === "in_progress" ? '<span class="agent-check" style="color:var(--amber)">···</span>' : ""}
+      `;
+      list.appendChild(item);
+    });
+  });
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+  document.getElementById("progress-fill").style.width = pct + "%";
+  document.getElementById("progress-label").textContent = `${completed} / ${total}`;
+}
+
+function updateAgentStatus(agent, status) {
+  state.agentStatus[agent] = status;
+  renderAgentList(state.agentStatus);
+}
+
+function upsertReportCard(section, content, status) {
+  const cards = document.getElementById("report-cards");
+  let card = document.getElementById(`card-${section}`);
+  if (!card) {
+    card = document.createElement("div");
+    card.className = "report-card";
+    card.id = `card-${section}`;
+    card.innerHTML = `
+      <div class="report-card-header">
+        <span class="report-card-title" id="title-${section}"></span>
+        <span class="report-card-team">${SECTION_TEAM[section] || ""}</span>
+      </div>
+      <div class="report-card-body" id="body-${section}"></div>
+    `;
+    cards.appendChild(card);
+  }
+  const titleEl = document.getElementById(`title-${section}`);
+  const bodyEl = document.getElementById(`body-${section}`);
+  const isInProgress = status === "in_progress";
+  card.className = `report-card ${isInProgress ? "in_progress" : ""}`;
+  const label = SECTION_LABELS[section] || section;
+  titleEl.className = `report-card-title ${isInProgress ? "in_progress" : "completed"}`;
+  titleEl.textContent = isInProgress ? `⟳ ${label} 生成中` : `✓ ${label}`;
+  bodyEl.innerHTML = marked.parse(content) + (isInProgress ? '<span class="cursor">▌</span>' : "");
+}
+
+function showDecisionCard(type, data) {
+  const card = document.getElementById("decision-card");
+  const actionEl = document.getElementById("decision-action");
+  const detailEl = document.getElementById("decision-detail");
+  card.classList.remove("hidden", "BUY", "SELL", "HOLD", "pending");
+  if (type === "pending") {
+    card.classList.add("pending");
+    actionEl.textContent = "等待分析完成...";
+    detailEl.textContent = "";
+  } else {
+    card.classList.add(data.action);
+    actionEl.textContent = data.action;
+    detailEl.innerHTML = marked.parse(data.raw || "").slice(0, 500);
+  }
+}
+
+// ---- Analysis flow ----
+async function startAnalysis() {
+  const ticker = document.getElementById("ticker-input").value.trim().toUpperCase();
+  const date = document.getElementById("date-input").value;
+  const analysts = [...document.querySelectorAll(".pill.active")].map(p => p.dataset.analyst);
+  const language = document.getElementById("language-select").value;
+
+  if (!ticker) { alert("请输入股票代码"); return; }
+  if (!date) { alert("请选择分析日期"); return; }
+  if (analysts.length === 0) { alert("请至少选择一个分析师"); return; }
+
+  document.getElementById("submit-btn").disabled = true;
+  document.getElementById("report-cards").innerHTML = "";
+  state = { agentStatus: {}, reportSections: {}, jobId: null, es: null };
+  renderAgentList({});
+  showDecisionCard("pending", null);
+
+  let resp;
+  try {
+    resp = await fetch(`${BACKEND_URL}/api/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, date, analysts, language }),
+    });
+  } catch {
+    setStatus("无法连接到分析服务器");
+    document.getElementById("submit-btn").disabled = false;
+    return;
+  }
+
+  if (resp.status === 429) {
+    document.getElementById("busy-overlay").classList.remove("hidden");
+    setTimeout(() => document.getElementById("busy-overlay").classList.add("hidden"), 3000);
+    document.getElementById("submit-btn").disabled = false;
+    return;
+  }
+
+  if (!resp.ok) {
+    setStatus(`启动失败: ${resp.status}`);
+    document.getElementById("submit-btn").disabled = false;
+    return;
+  }
+
+  const { job_id } = await resp.json();
+  state.jobId = job_id;
+  setStatus(`分析中 · ${ticker}`, "约需 3-8 分钟");
+  connectSSE(job_id);
+}
+
+function connectSSE(jobId) {
+  const es = new EventSource(`${BACKEND_URL}/api/stream/${jobId}`);
+  state.es = es;
+
+  es.addEventListener("agent_status", e => {
+    const { agent, status } = JSON.parse(e.data);
+    updateAgentStatus(agent, status);
+  });
+
+  es.addEventListener("report_section", e => {
+    const { section, content } = JSON.parse(e.data);
+    state.reportSections[section] = content;
+    const agentForSection = SECTION_TEAM[section];
+    const agentStatus = state.agentStatus[agentForSection] || "in_progress";
+    upsertReportCard(section, content, agentStatus === "completed" ? "completed" : "in_progress");
+  });
+
+  es.addEventListener("final_decision", e => {
+    const data = JSON.parse(e.data);
+    showDecisionCard("final", data);
+    // Mark final_trade_decision card as completed
+    if (state.reportSections["final_trade_decision"]) {
+      upsertReportCard("final_trade_decision", state.reportSections["final_trade_decision"], "completed");
+    }
+  });
+
+  es.addEventListener("done", () => {
+    es.close();
+    setStatus("分析完成", "");
+    document.getElementById("submit-btn").disabled = false;
+    // Mark all in-progress report cards as completed
+    document.querySelectorAll(".report-card.in_progress").forEach(card => {
+      card.classList.remove("in_progress");
+      const section = card.id.replace("card-", "");
+      const titleEl = document.getElementById(`title-${section}`);
+      if (titleEl) {
+        titleEl.className = "report-card-title completed";
+        titleEl.textContent = `✓ ${SECTION_LABELS[section] || section}`;
+      }
+      const bodyEl = document.getElementById(`body-${section}`);
+      const cursor = bodyEl && bodyEl.querySelector(".cursor");
+      if (cursor) cursor.remove();
+    });
+    // Show download button
+    showDownloadButton(state.jobId);
+  });
+
+  es.addEventListener("error", e => {
+    es.close();
+    let msg = "分析出错";
+    try { msg = JSON.parse(e.data).message; } catch {}
+    setStatus(`错误: ${msg}`);
+    document.getElementById("submit-btn").disabled = false;
+  });
+
+  es.onerror = () => {
+    // EventSource will auto-reconnect using Last-Event-ID
+    setStatus("连接中断，正在重连...", "");
+  };
+}
+
+async function showDownloadButton(jobId) {
+  try {
+    const resp = await fetch(`${BACKEND_URL}/api/report/${jobId}`);
+    if (!resp.ok) return;
+    const { content } = await resp.json();
+    const btn = document.createElement("button");
+    btn.className = "submit-btn";
+    btn.style.cssText = "margin:8px 0;font-size:12px;padding:6px 16px;background:#374151";
+    btn.textContent = "⬇ 下载完整报告";
+    btn.onclick = () => {
+      const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `report-${jobId.slice(0, 8)}.md`;
+      a.click();
+    };
+    document.getElementById("report-cards").prepend(btn);
+  } catch {}
+}
