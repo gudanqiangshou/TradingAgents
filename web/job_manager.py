@@ -1,8 +1,15 @@
+"""In-memory job state for the TradingAgents web backend.
+
+Enforces a single concurrent analysis job via a global mutex, and runs a
+per-job watchdog timer that sets the job's stop_event and marks it ERROR
+if the analysis exceeds the timeout (default 600s). State is in-memory
+only — jobs do not survive a server restart.
+"""
 from __future__ import annotations
 import threading
 import uuid
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
 
 class JobStatus(Enum):
@@ -26,7 +33,7 @@ class _Job:
         self._watchdog_timeout = watchdog_timeout
         self._watchdog_timer: Optional[threading.Timer] = None
 
-    def start_watchdog(self, on_timeout):
+    def start_watchdog(self, on_timeout: Callable[[], None]) -> None:
         self._watchdog_timer = threading.Timer(self._watchdog_timeout, on_timeout)
         self._watchdog_timer.daemon = True
         self._watchdog_timer.start()
@@ -44,6 +51,7 @@ class JobManager:
         self._watchdog_timeout = watchdog_timeout
 
     def create_job(self) -> str:
+        """Create a new PENDING job and return its id."""
         job_id = str(uuid.uuid4())
         self._jobs[job_id] = _Job(job_id, self._watchdog_timeout)
         return job_id
@@ -54,6 +62,7 @@ class JobManager:
         return self._jobs[job_id]
 
     def start_job(self, job_id: str) -> None:
+        """Start a job and activate its watchdog timer."""
         with self._lock:
             if self._running_job_id is not None:
                 raise RuntimeError(
@@ -74,6 +83,7 @@ class JobManager:
             pass
 
     def finish_job(self, job_id: str) -> None:
+        """Mark a job as DONE and cancel its watchdog timer."""
         with self._lock:
             job = self._get(job_id)
             job.cancel_watchdog()
@@ -82,6 +92,7 @@ class JobManager:
                 self._running_job_id = None
 
     def error_job(self, job_id: str, message: str = "") -> None:
+        """Mark a job as ERROR with an optional error message."""
         with self._lock:
             job = self._get(job_id)
             job.cancel_watchdog()
@@ -91,16 +102,21 @@ class JobManager:
                 self._running_job_id = None
 
     def get_status(self, job_id: str) -> JobStatus:
+        """Get the current status of a job."""
         return self._get(job_id).status
 
     def get_stop_event(self, job_id: str) -> threading.Event:
+        """Return the stop event for a job."""
         return self._get(job_id).stop_event
 
     def has_running_job(self) -> bool:
+        """Check if a job is currently running."""
         return self._running_job_id is not None
 
     def set_report(self, job_id: str, content: str) -> None:
+        """Store the report content for a job."""
         self._get(job_id).report = content
 
     def get_report(self, job_id: str) -> Optional[str]:
+        """Get the report content for a job, or None if not set."""
         return self._get(job_id).report
