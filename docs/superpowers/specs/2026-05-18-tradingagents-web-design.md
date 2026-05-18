@@ -132,7 +132,17 @@ All events carry JSON in the `data` field and a monotonically increasing integer
 | `done` | Analysis complete | `{ "job_id": "..." }` |
 | `error` | Analysis failed | `{ "message": "..." }` |
 
-**`final_decision.action` extraction:** The backend uses `signal_processing.SignalProcessor.process_signal()` (already in the codebase) to extract the BUY/SELL/HOLD action from the `final_trade_decision` string. The full markdown is also included as `raw` so the frontend can render the complete rationale.
+**`final_decision.action` extraction:** The backend uses `signal_processing.SignalProcessor.process_signal()` (already in the codebase) to extract the signal from `final_trade_decision`. `process_signal()` returns a 5-tier value (`Buy`, `Overweight`, `Hold`, `Underweight`, `Sell`). The backend maps this to a 3-tier `action` for the frontend:
+
+| `process_signal()` result | `action` sent to frontend |
+|---|---|
+| `Buy` | `BUY` |
+| `Overweight` | `BUY` |
+| `Hold` | `HOLD` |
+| `Underweight` | `SELL` |
+| `Sell` | `SELL` |
+
+If `process_signal()` returns `None` or an unrecognised string, `action` defaults to `HOLD`. The full markdown is also included as `raw` so the frontend can render the complete rationale.
 
 ---
 
