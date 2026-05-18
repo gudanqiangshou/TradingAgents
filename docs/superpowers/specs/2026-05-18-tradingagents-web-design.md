@@ -1,89 +1,89 @@
-# TradingAgents Web — Design Spec
+# TradingAgents Web — 设计规格
 
-**Date:** 2026-05-18  
-**Status:** Approved  
-
----
-
-## Overview
-
-Build a responsive web interface on top of the existing TradingAgents multi-agent LLM trading framework. Users enter a stock ticker and configuration, then watch the multi-agent analysis process unfold in real time before seeing the final BUY/SELL/HOLD decision.
+**日期：** 2026-05-18  
+**状态：** 已确认  
 
 ---
 
-## Goals
+## 概述
 
-- Public-accessible website anyone can use via a URL
-- Real-time visibility into each agent's progress and output
-- Mobile and desktop compatible
-- Minimal new infrastructure — reuse the existing TradingAgents Python codebase and `.env` configuration
+在现有 TradingAgents 多智能体 LLM 交易框架之上构建一个响应式 Web 界面。用户输入股票代码和配置参数，实时观察多智能体分析过程，最终获得 BUY/SELL/HOLD 交易决策。
 
 ---
 
-## Non-Goals
+## 目标
 
-- Authentication / user accounts
-- Storing historical analyses in a database
-- Multiple simultaneous analyses
-- Backtesting or portfolio tracking
+- 公网可访问，任何人可通过 URL 使用
+- 实时展示每个智能体的运行进度和输出内容
+- 兼容手机和电脑
+- 最小化新增基础设施——复用现有 TradingAgents Python 代码库和 `.env` 配置
 
 ---
 
-## Architecture
+## 非目标
+
+- 用户认证 / 账户体系
+- 历史分析记录持久化存储
+- 多任务并发分析
+- 回测或投资组合追踪
+
+---
+
+## 系统架构
 
 ```
 ┌─────────────────────────────────┐        ┌─────────────────────────────────┐
-│   GitHub Pages (Frontend)       │        │   Mac Mini (Backend)            │
+│   GitHub Pages（前端）           │        │   Mac Mini（后端）               │
 │                                 │        │                                 │
 │  index.html                     │──POST──▶  FastAPI  web/app.py           │
-│  style.css              ◀──SSE──│        │  TradingAgents (existing)       │
-│  app.js (EventSource)           │        │  Cloudflare Tunnel (stable URL) │
+│  style.css              ◀──SSE──│        │  TradingAgents（现有项目）        │
+│  app.js (EventSource)           │        │  Cloudflare Tunnel（稳定公网URL） │
 └─────────────────────────────────┘        └─────────────────────────────────┘
 ```
 
-**Frontend** — static HTML/CSS/Vanilla JS pushed to GitHub Pages (the `web/frontend/` subdirectory of the TradingAgents repo, configured as the Pages source).
+**前端** — 纯静态 HTML/CSS/Vanilla JS，推送到 GitHub Pages（TradingAgents 仓库的 `web/frontend/` 子目录，配置为 Pages 来源）。
 
-**Backend** — FastAPI service added to the existing TradingAgents repo under `web/`, running permanently on the Mac Mini, exposed via a **named Cloudflare Tunnel with a stable custom subdomain** (e.g., `tradingagents-api.yourdomain.com`). Reuses existing `.env` (DeepSeek via AiCodeWith proxy).
+**后端** — FastAPI 服务，新增在现有 TradingAgents 仓库的 `web/` 目录下，常驻运行于 Mac Mini，通过**命名 Cloudflare Tunnel 的稳定自定义子域名**对外暴露（如 `tradingagents-api.yourdomain.com`）。复用现有 `.env` 配置（DeepSeek via AiCodeWith 中转）。
 
-**Real-time protocol** — Server-Sent Events (SSE). The server pushes one-directional updates to the browser as agents complete their work. No WebSocket needed.
+**实时协议** — Server-Sent Events（SSE）。服务器单向推送智能体状态更新到浏览器，无需 WebSocket。
 
 ---
 
-## Repository Structure
+## 仓库结构
 
 ```
-TradingAgents/               ← existing repo
-├── tradingagents/           ← unchanged
-├── cli/                     ← unchanged
+TradingAgents/               ← 现有仓库
+├── tradingagents/           ← 不改动
+├── cli/                     ← 不改动
 ├── web/
-│   ├── app.py               ← FastAPI application (entry point)
-│   ├── sse_handler.py       ← SSE event queue and serialization
-│   ├── job_manager.py       ← in-memory job state, 1-job lock, watchdog
+│   ├── app.py               ← FastAPI 应用入口
+│   ├── sse_handler.py       ← SSE 事件队列与序列化
+│   ├── job_manager.py       ← 内存任务状态、1任务锁、超时看门狗
 │   ├── requirements.txt     ← fastapi, uvicorn, sse-starlette, python-dotenv
-│   └── frontend/            ← GitHub Pages source
+│   └── frontend/            ← GitHub Pages 来源目录
 │       ├── index.html
-│       ├── config.js        ← BACKEND_URL (gitignored, set per deployment)
+│       ├── config.js        ← BACKEND_URL（已加入 .gitignore，按部署环境设置）
 │       ├── style.css
 │       └── app.js
 └── docs/superpowers/specs/
     └── 2026-05-18-tradingagents-web-design.md
 ```
 
-`config.js` is listed in `.gitignore` and contains only:
+`config.js` 加入 `.gitignore`，文件内容仅一行：
 ```js
 const BACKEND_URL = "https://tradingagents-api.yourdomain.com";
 ```
-`app.js` reads `BACKEND_URL` from this file. This avoids baking the tunnel URL into version-controlled source.
+`app.js` 从该文件读取 `BACKEND_URL`，避免将 Tunnel URL 硬编码进版本控制。
 
 ---
 
-## Backend API
+## 后端 API
 
 ### `POST /api/analyze`
 
-Start an analysis job. Returns immediately with a `job_id`.
+启动分析任务，立即返回 `job_id`。
 
-**Request body:**
+**请求体：**
 ```json
 {
   "ticker": "TSLA",
@@ -93,48 +93,48 @@ Start an analysis job. Returns immediately with a `job_id`.
 }
 ```
 
-**Response:**
+**响应：**
 ```json
-{ "job_id": "uuid4-string" }
+{ "job_id": "uuid4字符串" }
 ```
 
-**Errors:**
-- `429` — another job is already running (1 concurrent job limit)
-- `422` — validation error (invalid ticker, date format, etc.)
+**错误码：**
+- `429` — 已有任务在运行（1任务并发限制）
+- `422` — 参数校验失败（股票代码非法、日期格式错误等）
 
 ---
 
 ### `GET /api/stream/{job_id}`
 
-SSE endpoint. Streams all events for the job: replays buffered events first (for reconnects), then streams live events until `done` or `error`.
+SSE 端点。先重放缓冲事件（支持断线重连），再推送实时事件，直至 `done` 或 `error`。
 
-**Response headers:** `Content-Type: text/event-stream`
+**响应头：** `Content-Type: text/event-stream`
 
-Uses the `Last-Event-ID` header: each SSE event carries a monotonically increasing `id`. On reconnect, the server replays events whose `id` is greater than the `Last-Event-ID` from the event buffer.
+支持 `Last-Event-ID` 头：每个 SSE 事件携带单调递增整数 `id`。断线重连时，服务端从事件缓冲列表中重放 `id` 大于 `Last-Event-ID` 的事件。
 
 ---
 
 ### `GET /api/report/{job_id}`
 
-Return the complete final report as Markdown. Returns 404 with `{"detail": "job not found or expired"}` if the job is unknown (e.g., after a server restart).
+以 Markdown 格式返回完整最终报告。若 job 不存在（如服务重启后），返回 404：`{"detail": "任务不存在或已过期"}`。
 
 ---
 
-## SSE Event Schema
+## SSE 事件格式
 
-All events carry JSON in the `data` field and a monotonically increasing integer `id`.
+所有事件的 `data` 字段为 JSON，携带单调递增整数 `id`。
 
-| Event | When | Payload |
+| 事件名 | 触发时机 | 数据结构 |
 |---|---|---|
-| `agent_status` | Agent state changes | `{ "agent": "新闻分析师", "status": "pending\|in_progress\|completed" }` |
-| `report_section` | A report section is ready | `{ "section": "news_report", "content": "## ...(markdown)" }` |
-| `final_decision` | Portfolio Manager finishes | `{ "raw": "<full markdown of final_trade_decision>", "action": "BUY\|SELL\|HOLD" }` |
-| `done` | Analysis complete | `{ "job_id": "..." }` |
-| `error` | Analysis failed | `{ "message": "..." }` |
+| `agent_status` | 智能体状态变更 | `{ "agent": "新闻分析师", "status": "pending\|in_progress\|completed" }` |
+| `report_section` | 某个报告章节就绪 | `{ "section": "news_report", "content": "## ...(Markdown全文)" }` |
+| `final_decision` | 投资组合经理完成 | `{ "raw": "最终决策Markdown全文", "action": "BUY\|SELL\|HOLD" }` |
+| `done` | 分析全部完成 | `{ "job_id": "..." }` |
+| `error` | 分析失败 | `{ "message": "错误描述" }` |
 
-**`final_decision.action` extraction:** The backend uses `signal_processing.SignalProcessor.process_signal()` (already in the codebase) to extract the signal from `final_trade_decision`. `process_signal()` returns a 5-tier value (`Buy`, `Overweight`, `Hold`, `Underweight`, `Sell`). The backend maps this to a 3-tier `action` for the frontend:
+**`final_decision.action` 提取逻辑：** 后端调用 `signal_processing.SignalProcessor.process_signal()` 从 `final_trade_decision` 字符串中提取信号。`process_signal()` 返回5档值，映射为前端3档 `action`：
 
-| `process_signal()` result | `action` sent to frontend |
+| `process_signal()` 返回值 | `action` |
 |---|---|
 | `Buy` | `BUY` |
 | `Overweight` | `BUY` |
@@ -142,148 +142,148 @@ All events carry JSON in the `data` field and a monotonically increasing integer
 | `Underweight` | `SELL` |
 | `Sell` | `SELL` |
 
-If `process_signal()` returns `None` or an unrecognised string, `action` defaults to `HOLD`. The full markdown is also included as `raw` so the frontend can render the complete rationale.
+若返回 `None` 或无法识别的字符串，`action` 默认为 `HOLD`。`raw` 字段同时传递完整 Markdown，供前端渲染完整分析理由。
 
 ---
 
-## TradingAgents Integration
+## TradingAgents 集成方式
 
-The backend calls the LangGraph stream directly (as the CLI does in `cli/main.py`) rather than calling `propagate()`, which uses `graph.invoke()` and does not stream:
+后端直接调用 LangGraph stream（与 CLI 一致），而非调用 `propagate()`——`propagate()` 内部使用 `graph.invoke()`，不流式：
 
-1. `POST /api/analyze` acquires the 1-job lock, then spawns a **daemon background thread** (via `threading.Thread`) to run the analysis. A fresh `TradingAgentsGraph` instance is created **inside the thread** to avoid shared mutable state.
+1. `POST /api/analyze` 获取1任务锁，然后通过 `threading.Thread` 启动**守护后台线程**执行分析。**每个任务在线程内部新建一个 `TradingAgentsGraph` 实例**，避免共享可变状态。
 
-2. The thread calls `graph.graph.stream(init_state, **propagator.get_graph_args())` directly — the same call path used by the CLI. It iterates chunks and uses the `MessageBuffer` detection logic (ported from `cli/main.py`) to detect `agent_status` and `report_sections` changes.
+2. 线程直接调用 `graph.graph.stream(init_state, **propagator.get_graph_args())`（与 CLI 相同的调用路径），迭代 chunks，复用 `cli/main.py` 中的 `MessageBuffer` 检测逻辑，识别 `agent_status` 和 `report_sections` 的变化。
 
-3. Each state-change event is bridged from the sync thread to the async event loop via `asyncio.get_event_loop().call_soon_threadsafe(queue.put_nowait, event)`. A per-job `asyncio.Queue` holds pending events, and a parallel **event buffer list** retains all events for replay on reconnect.
+3. 每次状态变化通过 `asyncio.get_event_loop().call_soon_threadsafe(queue.put_nowait, event)` 从同步线程桥接到异步事件循环。每个任务维护一个 `asyncio.Queue` 存放待发事件，同时维护一个**事件缓冲列表**保存所有历史事件以支持重连重放。
 
-4. The SSE handler (`GET /api/stream/{job_id}`) is an `async` generator that awaits events from the queue and yields them as SSE lines. On reconnect (detected via `Last-Event-ID` header), it replays buffered events before resuming live.
+4. SSE 处理器（`GET /api/stream/{job_id}`）是一个 `async` 生成器，`await` 队列中的事件并格式化为 SSE 行输出。断线重连时（通过 `Last-Event-ID` 头检测），先从缓冲列表重放历史事件，再继续推送实时事件。
 
-5. On completion, `SignalProcessor.process_signal()` extracts the action from `final_trade_decision`; the backend emits `final_decision` then `done`, and releases the job lock.
+5. 分析完成后，调用 `SignalProcessor.process_signal()` 提取 action，推送 `final_decision` 事件，再推送 `done`，最后释放任务锁。
 
-**Concurrency:** Only 1 job may run at a time. New requests while a job is active return HTTP 429. The frontend shows a "分析进行中，请稍后再试" overlay.
+**并发限制：** 同一时间只允许1个任务运行。有任务在跑时新请求返回 HTTP 429，前端显示"当前有分析任务运行中，请稍后再试"遮罩层。
 
-**Job timeout watchdog:** `job_manager.py` starts a watchdog timer (10 minutes) when a job begins. If the thread has not emitted `done` within 10 minutes, the watchdog pushes an `error` event, terminates the thread (via a threading Event flag checked in the stream loop), and releases the lock. This prevents the server from being permanently stuck.
+**任务超时看门狗：** `job_manager.py` 在任务启动时开启10分钟计时器。若线程在10分钟内未推送 `done`，看门狗推送 `error` 事件，通过 threading Event 标志终止线程，并释放任务锁，防止服务器永久阻塞。
 
-**Side effects:** Each analysis writes files to `results_dir` (`~/.tradingagents/logs/`) and `data_cache_dir` (`~/.tradingagents/cache/`), and may update `memory_log_path`. These are the same side effects as the CLI and are acceptable for web use.
+**磁盘副作用：** 每次分析会向 `results_dir`（`~/.tradingagents/logs/`）和 `data_cache_dir`（`~/.tradingagents/cache/`）写入文件，并可能更新 `memory_log_path`。这与 CLI 行为一致，Web 场景下可接受。
 
 ---
 
-## Frontend UI
+## 前端 UI
 
-### Layout (Desktop)
+### 桌面端布局
 
 ```
-┌─────────────── Top Nav ───────────────────────────────┐
-│  ⬡ TradingAgents  |  多智能体金融分析    Powered by DeepSeek │
-├───────────────────────────────────────────────────────┤
-│  Input Bar: [TSLA] [2026-05-18] [✓市场][✓情绪][✓新闻][✓基本面] [中文▾] [开始分析] │
-├──────────────────────┬────────────────────────────────┤
-│  Agent Progress      │  Reports Panel                 │
-│  (220px fixed)       │  (flex remaining)              │
-│                      │  ┌─ Decision Card (pinned) ─┐  │
-│  [总进度 N/Total]━━━  │  │  BUY  20%  stop $395     │  │
-│  (computed from SSE) │  └──────────────────────────┘  │
-│                      │  ┌─ 市场分析报告 ✓ ──────────┐  │
-│  分析师团队           │  │  ...markdown content...   │  │
-│  ● 市场分析师 ✓       │  └──────────────────────────┘  │
-│  ● 情绪分析师 ✓       │  ┌─ 情绪分析报告 ✓ ──────────┐  │
-│  ⟳ 新闻分析师 ···     │  │  ...                      │  │
-│  ○ 基本面分析师       │  └──────────────────────────┘  │
-│                      │  ┌─ ⟳ 新闻分析报告 生成中 ───┐  │
-│  研究团队             │  │  ▌                        │  │
-│  ○ 多头研究员         │  └──────────────────────────┘  │
-│  ○ 空头研究员         │                                │
-│  ○ 研究经理           │                                │
-│                      │                                │
-│  交易/风控/组合       │                                │
-│  ○ 交易员             │                                │
-│  ○ 风控团队 (3人)     │                                │
-│  ○ 组合经理           │                                │
-├──────────────────────┴────────────────────────────────┤
-│  Status bar: ⟳ 分析进行中 · 新闻分析师运行中    ~3-5分钟 │
-└───────────────────────────────────────────────────────┘
+┌─────────────── 顶部导航栏 ────────────────────────────────┐
+│  ⬡ TradingAgents  |  多智能体金融分析        Powered by DeepSeek │
+├───────────────────────────────────────────────────────────┤
+│  输入区：[TSLA] [2026-05-18] [✓市场][✓情绪][✓新闻][✓基本面] [中文▾] [开始分析] │
+├──────────────────────┬────────────────────────────────────┤
+│  智能体进度面板        │  报告面板                           │
+│  （固定220px宽）      │  （flex剩余宽度）                    │
+│                      │  ┌─── 决策卡（置顶固定）────────┐   │
+│  [总进度 N/总数]━━━━  │  │  BUY  建仓20%  止损$395      │   │
+│  （从SSE动态计算）    │  └────────────────────────────┘   │
+│                      │  ┌─── 市场分析报告 ✓ ───────────┐  │
+│  分析师团队           │  │  ...Markdown内容...           │  │
+│  ● 市场分析师 ✓       │  └───────────────────────────── ┘  │
+│  ● 情绪分析师 ✓       │  ┌─── 情绪分析报告 ✓ ───────────┐  │
+│  ⟳ 新闻分析师 ···     │  │  ...                         │  │
+│  ○ 基本面分析师       │  └────────────────────────────┘   │
+│                      │  ┌─── ⟳ 新闻分析报告 生成中 ────┐  │
+│  研究团队             │  │  ▌                           │  │
+│  ○ 多头研究员         │  └────────────────────────────┘   │
+│  ○ 空头研究员         │                                   │
+│  ○ 研究经理           │                                   │
+│                      │                                   │
+│  交易/风控/组合       │                                   │
+│  ○ 交易员             │                                   │
+│  ○ 风控团队（3人）    │                                   │
+│  ○ 投资组合经理       │                                   │
+├──────────────────────┴────────────────────────────────────┤
+│  状态栏：⟳ 分析进行中 · 新闻分析师运行中          约需3-5分钟 │
+└───────────────────────────────────────────────────────────┘
 ```
 
-Agent count and progress fraction are computed dynamically from `agent_status` SSE events — not hardcoded.
+智能体数量和进度分数从 `agent_status` SSE 事件中动态计算，不硬编码。
 
-### Layout (Mobile)
+### 移动端布局
 
-- Input bar wraps to two rows
-- Agent progress panel collapses to a single progress bar strip (tap to expand)
-- Reports panel fills full width below
-- Decision card stays pinned at top of reports when complete
+- 输入区折行为两排
+- 智能体进度面板折叠为单行进度条（点击展开）
+- 报告面板占满全宽显示在下方
+- 分析完成后决策卡固定在报告区顶部
 
-### Key UI States
+### 页面状态机
 
-| State | Description |
+| 状态 | 说明 |
 |---|---|
-| **Idle** | Input form ready, no analysis running |
-| **Analyzing** | Left panel updates live; reports appear one by one; decision card dimmed/placeholder |
-| **Complete** | Decision card highlighted (BUY=green / SELL=red / HOLD=yellow); all reports visible; download button appears |
-| **Error** | Error banner in status bar; partial reports still visible |
-| **Busy (429)** | "当前有分析任务运行中，请稍后再试" overlay |
+| **空闲** | 输入表单就绪，无任务运行 |
+| **分析中** | 左侧面板实时更新；报告卡片逐个出现；决策卡半透明占位 |
+| **完成** | 决策卡高亮（BUY=绿色 / SELL=红色 / HOLD=琥珀色）；所有报告可见；出现下载按钮 |
+| **错误** | 状态栏显示错误提示；已生成的报告仍可查看 |
+| **繁忙（429）** | 显示"当前有分析任务运行中，请稍后再试"遮罩层 |
 
-### Decision Card Colors
+### 决策卡配色
 
-- **BUY** — green gradient (`#14532d → #166534`, border `#22c55e`)
-- **SELL** — red gradient (`#450a0a → #7f1d1d`, border `#ef4444`)
-- **HOLD** — amber gradient (`#451a03 → #92400e`, border `#f59e0b`)
+- **BUY** — 绿色渐变（`#14532d → #166534`，边框 `#22c55e`）
+- **SELL** — 红色渐变（`#450a0a → #7f1d1d`，边框 `#ef4444`）
+- **HOLD** — 琥珀色渐变（`#451a03 → #92400e`，边框 `#f59e0b`）
 
-### Report Cards
+### 报告卡片
 
-Each report section renders as a card with:
-- Header row: agent name + status badge + team label
-- Body: Markdown rendered via `marked.js` (CDN, no build step)
-- In-progress state: blinking cursor appended to content
+每个报告章节渲染为一张卡片：
+- 头部行：智能体名称 + 状态徽章 + 团队标签
+- 正文：通过 `marked.js`（CDN引入，无需构建）渲染 Markdown
+- 生成中状态：内容末尾显示闪烁光标
 
 ---
 
-## Deployment
+## 部署说明
 
-### Backend (Mac Mini)
+### 后端（Mac Mini）
 
-Run from the **repo root** so `tradingagents` package is importable:
+从**仓库根目录**运行，确保 `tradingagents` 包可被导入：
 
 ```bash
-# Install web dependencies (in addition to existing tradingagents deps)
+# 安装 Web 依赖（在现有 tradingagents 依赖基础上追加）
 pip install fastapi uvicorn sse-starlette python-dotenv
 
-# Run from repo root — keeps tradingagents on the Python path
+# 从仓库根目录启动——tradingagents 包自动在 Python 路径中
 uvicorn web.app:app --host 127.0.0.1 --port 8000
 
-# Cloudflare named tunnel (persistent via macOS LaunchAgent)
-# tunnel must be pre-created: cloudflared tunnel create tradingagents-web
+# Cloudflare 命名隧道（通过 macOS LaunchAgent 持久化运行）
+# 需提前创建：cloudflared tunnel create tradingagents-web
 cloudflared tunnel run tradingagents-web
 ```
 
-CORS is configured in `app.py` to allow requests from the GitHub Pages origin (`https://<user>.github.io`).
+`app.py` 中配置 CORS，允许来自 GitHub Pages 域名（`https://<用户名>.github.io`）的请求。
 
-### Frontend (GitHub Pages)
+### 前端（GitHub Pages）
 
-1. Create `web/frontend/config.js` locally (gitignored): set `BACKEND_URL` to the Cloudflare Tunnel URL.
-2. Configure GitHub Pages to serve from `web/frontend/` on the `main` branch.
-3. `index.html` loads `config.js` before `app.js` with a `<script>` tag.
+1. 在本地创建 `web/frontend/config.js`（已加入 `.gitignore`），将 `BACKEND_URL` 设为 Cloudflare Tunnel URL。
+2. 在 GitHub 仓库设置中，将 Pages 来源配置为 `web/frontend/` 目录（`main` 分支）。
+3. `index.html` 在加载 `app.js` 前先通过 `<script>` 标签加载 `config.js`。
 
-**Tunnel URL stability:** Use a named Cloudflare Tunnel with a custom domain or a free `*.trycloudflare.com` subdomain locked to the tunnel name. Avoid ephemeral `cloudflared tunnel --url` quick tunnels — those URLs change on restart.
+**Tunnel URL 稳定性：** 使用命名 Cloudflare Tunnel 绑定自定义域名或固定的 `*.trycloudflare.com` 子域名。避免使用 `cloudflared tunnel --url` 快速隧道——该方式每次重启 URL 会变化。
 
 ---
 
-## Error Handling
+## 错误处理
 
-| Scenario | Behaviour |
+| 场景 | 处理方式 |
 |---|---|
-| SSE connection drops | `EventSource` auto-reconnects with `Last-Event-ID`; server replays missed events from buffer |
-| Job ID not found (404) | Frontend shows "会话已过期，请重新提交" and resets to Idle |
-| LLM API timeout / exception | Backend catches, pushes `error` event, releases job lock |
-| Job watchdog timeout (10 min) | Backend pushes `error` event, releases lock, partial reports remain visible |
-| Invalid ticker | yfinance raises on data fetch; caught and returned as `error` event |
-| Mac Mini offline | GitHub Pages loads fine; "无法连接到分析服务器" message shown on submit |
+| SSE 连接断开 | `EventSource` 自动重连，携带 `Last-Event-ID`；服务端从缓冲重放未收到的事件 |
+| job_id 不存在（404） | 前端显示"会话已过期，请重新提交"并重置为空闲状态 |
+| LLM API 超时 / 异常 | 后端捕获异常，推送 `error` 事件，释放任务锁 |
+| 任务看门狗超时（10分钟）| 后端推送 `error` 事件，释放任务锁，已生成的报告仍可查看 |
+| 股票代码无效 | yfinance 数据获取时抛出异常，捕获后以 `error` 事件返回 |
+| Mac Mini 离线 | GitHub Pages 正常加载；提交时显示"无法连接到分析服务器" |
 
 ---
 
-## Out of Scope
+## 超出范围
 
-- Job persistence across server restarts (in-memory only)
-- Rate limiting beyond the 1-concurrent-job rule
-- User authentication
-- Saving/sharing past reports
+- 服务重启后的任务持久化（仅内存存储）
+- 超出1任务限制的速率控制
+- 用户认证
+- 历史报告保存与分享
