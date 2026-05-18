@@ -18,6 +18,7 @@ load_dotenv(_REPO_ROOT / ".env")
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
 
@@ -220,3 +221,14 @@ def _run_analysis_thread(
             job_mgr.error_job(job_id, str(exc))
         except Exception:
             pass
+
+
+# Serve the static frontend from the same origin as the API. Mounted last so
+# the /api/* routes above take precedence; everything else (/, /index.html,
+# /style.css, /app.js) is served from web/frontend/. Single-origin means no
+# CORS and no separate frontend host — one Cloudflare tunnel serves it all.
+app.mount(
+    "/",
+    StaticFiles(directory=str(_REPO_ROOT / "web" / "frontend"), html=True),
+    name="frontend",
+)

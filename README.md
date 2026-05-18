@@ -277,7 +277,12 @@ Please reference our work if you find *TradingAgents* provides you with some hel
 
 ## Web Interface
 
-A browser-based interface is available in `web/`. See `docs/superpowers/specs/2026-05-18-tradingagents-web-design.md` for full architecture details.
+A browser-based interface is available in `web/`. The FastAPI backend serves
+both the static frontend and the `/api/*` endpoints from a single origin, so
+there is no separate frontend host, no CORS configuration, and no config file:
+one process, one URL. See
+`docs/superpowers/specs/2026-05-18-tradingagents-web-design.md` for architecture
+details.
 
 ### Quick Start (Local)
 
@@ -285,35 +290,35 @@ A browser-based interface is available in `web/`. See `docs/superpowers/specs/20
 # 1. Install web dependencies
 pip install -r web/requirements.txt
 
-# 2. Copy and configure backend URL
-cp web/frontend/config.js.example web/frontend/config.js
-# Edit config.js: set BACKEND_URL to http://localhost:8000
-
-# 3. Set CORS to allow local file access
-export TRADINGAGENTS_CORS_ORIGINS="*"
-
-# 4. Start backend (from repo root)
+# 2. Start the server (from repo root) — serves UI + API
 uvicorn web.app:app --host 127.0.0.1 --port 8000
 
-# 5. Open web/frontend/index.html in browser
+# 3. Open http://localhost:8000 in your browser
 ```
 
-### Production Deployment (Mac Mini + Cloudflare Tunnel)
+### Remote Access (Mac Mini + Cloudflare Tunnel)
+
+Run the backend permanently on the Mac Mini and expose it through one Cloudflare
+named tunnel. The tunnel URL is the link you share — it works from any network,
+no same-WiFi requirement.
 
 ```bash
 # Create the log directory the LaunchAgent writes to
 mkdir -p ~/.tradingagents/logs
 
-# Install LaunchAgent
+# Install + start the backend as a LaunchAgent (auto-starts on login)
 cp web/launchd/tradingagents-web.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.tradingagents.web.plist
 
-# Set up Cloudflare named tunnel (one-time)
+# One-time: create a named tunnel pointing at the local backend
 cloudflared tunnel create tradingagents-web
-cloudflared tunnel route dns tradingagents-web tradingagents-api.yourdomain.com
-cloudflared tunnel run tradingagents-web
+cloudflared tunnel route dns tradingagents-web tradingagents.yourdomain.com
 
-# Configure GitHub Pages to serve web/frontend/ from main branch
-# Update config.js with your tunnel URL
-# Set TRADINGAGENTS_CORS_ORIGINS in .env to your GitHub Pages URL
+# Run the tunnel (or install it as a service for persistence)
+cloudflared tunnel run --url http://127.0.0.1:8000 tradingagents-web
 ```
+
+Share `https://tradingagents.yourdomain.com` (or the
+`*.trycloudflare.com` URL a quick tunnel prints). Anyone with the link reaches
+the same page and API. The Mac Mini must be online for the link to work — which
+it must be anyway, since it runs the analysis.

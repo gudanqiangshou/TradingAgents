@@ -126,3 +126,27 @@ def test_report_includes_final_decision_heading():
     report = "\n\n".join(parts)
     assert "## 最终交易决策" in report
     assert "**BUY**" in report
+
+
+def test_root_serves_frontend_index(client):
+    # Single-origin: FastAPI serves the static frontend at "/".
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "TradingAgents" in resp.text
+    assert 'id="ticker-input"' in resp.text
+
+
+def test_static_assets_served(client):
+    # app.js and style.css are served from the same origin as the API.
+    js = client.get("/app.js")
+    assert js.status_code == 200
+    assert "/api/analyze" in js.text  # relative path, no BACKEND_URL
+    css = client.get("/style.css")
+    assert css.status_code == 200
+
+
+def test_api_routes_take_precedence_over_static_mount(client):
+    # The "/" StaticFiles mount must not shadow /api/* routes.
+    resp = client.get("/api/report/unknown-id")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "任务不存在或已过期"

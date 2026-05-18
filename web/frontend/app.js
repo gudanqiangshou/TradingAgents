@@ -1,5 +1,5 @@
-// ---- Config (loaded from config.js) ----
-// BACKEND_URL is injected by config.js before this file loads
+// ---- Single-origin: FastAPI serves this page and the /api/* endpoints,
+// so all requests use relative paths (no BACKEND_URL / config.js needed) ----
 
 // ---- State ----
 const AGENT_TEAMS = [
@@ -168,7 +168,7 @@ async function startAnalysis() {
 
   let resp;
   try {
-    resp = await fetch(`${BACKEND_URL}/api/analyze`, {
+    resp = await fetch(`/api/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ticker, date, analysts, language }),
@@ -199,7 +199,7 @@ async function startAnalysis() {
 }
 
 function connectSSE(jobId) {
-  const es = new EventSource(`${BACKEND_URL}/api/stream/${jobId}`);
+  const es = new EventSource(`/api/stream/${jobId}`);
   state.es = es;
 
   es.addEventListener("agent_status", e => {
@@ -261,7 +261,7 @@ function connectSSE(jobId) {
 
 async function showDownloadButton(jobId) {
   try {
-    const resp = await fetch(`${BACKEND_URL}/api/report/${jobId}`);
+    const resp = await fetch(`/api/report/${jobId}`);
     if (!resp.ok) return;
     const { content } = await resp.json();
     const btn = document.createElement("button");
