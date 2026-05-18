@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TradingAgents — 多智能体金融分析</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="config.js"></script>
+</head>
+<body>
+  <!-- Top Nav -->
+  <nav class="topnav">
+    <div class="topnav-brand">
+      <span class="brand-icon">⬡</span>
+      <span class="brand-name">TradingAgents</span>
+      <span class="brand-sep">|</span>
+      <span class="brand-sub">多智能体金融分析</span>
+    </div>
+    <div class="topnav-model" id="model-label">Powered by DeepSeek</div>
+  </nav>
+
+  <!-- Input Bar -->
+  <div class="input-bar">
+    <div class="input-group">
+      <label class="input-label">代码</label>
+      <input id="ticker-input" class="ticker-input" type="text"
+             placeholder="TSLA / BTC-USD / 700.HK" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="input-group">
+      <label class="input-label">日期</label>
+      <input id="date-input" class="date-input" type="date">
+    </div>
+    <div class="analyst-pills" id="analyst-pills">
+      <button class="pill active" data-analyst="market">市场</button>
+      <button class="pill active" data-analyst="social">情绪</button>
+      <button class="pill active" data-analyst="news">新闻</button>
+      <button class="pill active" data-analyst="fundamentals">基本面</button>
+    </div>
+    <div class="input-group">
+      <select id="language-select" class="language-select">
+        <option value="Chinese">🌐 中文</option>
+        <option value="English">🌐 English</option>
+      </select>
+    </div>
+    <button id="submit-btn" class="submit-btn" onclick="startAnalysis()">开始分析</button>
+  </div>
+
+  <!-- Busy Overlay -->
+  <div id="busy-overlay" class="busy-overlay hidden">
+    <div class="busy-message">当前有分析任务运行中，请稍后再试</div>
+  </div>
+
+  <!-- Main Panel -->
+  <div class="main-panel">
+    <!-- Left: Agent Progress -->
+    <div class="progress-panel">
+      <div class="progress-header">
+        <span class="panel-title">智能体进度</span>
+        <button class="collapse-btn" id="collapse-btn" onclick="toggleProgress()">▾</button>
+      </div>
+      <div id="progress-body">
+        <div class="progress-bar-row">
+          <div class="progress-track">
+            <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+          </div>
+          <span class="progress-label" id="progress-label">0 / 0</span>
+        </div>
+        <div id="agent-list" class="agent-list"></div>
+      </div>
+    </div>
+
+    <!-- Right: Reports -->
+    <div class="reports-panel" id="reports-panel">
+      <!-- Decision Card (pinned top) -->
+      <div id="decision-card" class="decision-card hidden">
+        <div class="decision-action" id="decision-action">—</div>
+        <div class="decision-detail" id="decision-detail"></div>
+      </div>
+      <!-- Report cards injected here -->
+      <div id="report-cards"></div>
+    </div>
+  </div>
+
+  <!-- Status Bar -->
+  <div class="statusbar">
+    <span id="status-text">就绪</span>
+    <span id="status-hint"></span>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
