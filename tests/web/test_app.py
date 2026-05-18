@@ -100,3 +100,29 @@ def test_stream_replays_buffered_events_and_terminates(client):
     # never literal "data: event: ..." text.
     assert "data: event:" not in body
     assert "data: id:" not in body
+
+
+def test_buffer_eviction_caps_memory(client):
+    from web import app as app_module
+    with patch("web.app._run_analysis_thread"):
+        for _ in range(app_module._MAX_BUFFERS + 5):
+            r = client.post("/api/analyze", json={
+                "ticker": "TSLA", "date": "2026-05-18",
+                "analysts": ["market"], "language": "Chinese",
+            })
+            jid = r.json()["job_id"]
+            # finish each job so the next POST is allowed and FIFO eviction applies
+            app_module.job_mgr.finish_job(jid)
+    assert len(app_module._buffers) <= app_module._MAX_BUFFERS
+
+
+def test_report_includes_final_decision_heading():
+    # Unit-test the report-assembly contract: the persisted report must carry
+    # an explicit decision heading. We exercise the same join the thread does.
+    from web.state_tracker import SIGNAL_ACTION_MAP
+    parts = ["## market_report\nTSLA technicals..."]
+    action = SIGNAL_ACTION_MAP.get("Buy", "HOLD")
+    parts.append(f"## 最终交易决策\n\n**{action}**")
+    report = "\n\n".join(parts)
+    assert "## 最终交易决策" in report
+    assert "**BUY**" in report

@@ -28,6 +28,7 @@ from web.state_tracker import AgentTracker, process_chunk, SIGNAL_ACTION_MAP
 # --- Global state ---
 job_mgr = JobManager(watchdog_timeout=600.0)
 _buffers: dict[str, EventBuffer] = {}
+_MAX_BUFFERS = 20
 _loop: Optional[asyncio.AbstractEventLoop] = None
 
 
@@ -86,7 +87,21 @@ def start_analyze(req: AnalyzeRequest):
     job_id = job_mgr.create_job()
     buf = EventBuffer()
     _buffers[job_id] = buf
-    job_mgr.start_job(job_id)
+    # Evict oldest buffers beyond the cap (single-user, jobs run sequentially,
+    # so FIFO eviction never drops the currently-running job's buffer).
+    while len(_buffers) > _MAX_BUFFERS:
+        oldest_id = next(iter(_buffers))
+        if oldest_id == job_id:
+            break
+        _buffers.pop(oldest_id, None)
+    try:
+        job_mgr.start_job(job_id)
+    except RuntimeError:
+        # Lost the race against a concurrent POST: discard this job+buffer
+        # and report busy cleanly instead of leaking a 500.
+        _buffers.pop(job_id, None)
+        job_mgr.remove_job(job_id)
+        raise HTTPException(status_code=429, detail="当前有分析任务运行中，请稍后再试")
     thread = threading.Thread(
         target=_run_analysis_thread,
         args=(job_id, req.ticker, req.date, req.analysts, req.language),
@@ -187,6 +202,7 @@ def _run_analysis_thread(
             raw_signal = SignalProcessor().process_signal(final_decision)
             action = SIGNAL_ACTION_MAP.get(raw_signal or "", "HOLD")
             _emit(job_id, "final_decision", {"raw": final_decision, "action": action})
+            final_report_parts.append(f"## 最终交易决策\n\n**{action}**")
 
         full_report = "\n\n".join(final_report_parts)
         job_mgr.set_report(job_id, full_report)

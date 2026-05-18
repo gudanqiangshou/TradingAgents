@@ -89,3 +89,21 @@ def test_get_report_and_set_report():
     assert mgr.get_report(job_id) is None
     mgr.set_report(job_id, "# Report content")
     assert mgr.get_report(job_id) == "# Report content"
+
+
+def test_remove_job_discards_and_releases_lock():
+    mgr = JobManager()
+    job1 = mgr.create_job()
+    mgr.start_job(job1)
+    mgr.remove_job(job1)
+    with pytest.raises(JobNotFoundError):
+        mgr.get_status(job1)
+    # lock released — a new job can start
+    job2 = mgr.create_job()
+    mgr.start_job(job2)
+    assert mgr.has_running_job()
+
+
+def test_remove_unknown_job_is_noop():
+    mgr = JobManager()
+    mgr.remove_job("no-such-id")  # must not raise

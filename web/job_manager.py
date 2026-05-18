@@ -120,3 +120,11 @@ class JobManager:
     def get_report(self, job_id: str) -> Optional[str]:
         """Get the report content for a job, or None if not set."""
         return self._get(job_id).report
+
+    def remove_job(self, job_id: str) -> None:
+        """Discard a job entirely (used to clean up a job that failed to start)."""
+        job = self._jobs.pop(job_id, None)
+        if job is not None:
+            job.cancel_watchdog()
+            if self._running_job_id == job_id:
+                self._running_job_id = None
