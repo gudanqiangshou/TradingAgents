@@ -89,5 +89,14 @@ def test_stream_replays_buffered_events_and_terminates(client):
     buf.add("done", {"job_id": job_id})
     with client.stream("GET", f"/api/stream/{job_id}") as r:
         body = "".join(r.iter_text())
-    assert "event: agent_status" in body
-    assert "event: done" in body
+    # Parse SSE frames: each frame separated by blank line; collect event: lines.
+    event_types = []
+    for line in body.splitlines():
+        if line.startswith("event:"):
+            event_types.append(line.split(":", 1)[1].strip())
+    assert "agent_status" in event_types
+    assert "done" in event_types
+    # Guard against the double-wrap regression: the data line must be raw JSON,
+    # never literal "data: event: ..." text.
+    assert "data: event:" not in body
+    assert "data: id:" not in body

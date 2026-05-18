@@ -1,6 +1,7 @@
 import asyncio
+import json
 import pytest
-from web.sse_handler import EventBuffer, format_sse, sse_stream
+from web.sse_handler import EventBuffer, format_sse, to_sse_dict, sse_stream
 
 
 def test_format_sse_basic():
@@ -9,6 +10,15 @@ def test_format_sse_basic():
     assert '"agent": "市场分析师"' in result
     assert "id: 1\n" in result
     assert result.endswith("\n\n")
+
+
+def test_to_sse_dict_shape():
+    d = to_sse_dict({"id": 7, "type": "agent_status", "data": {"agent": "市场分析师", "status": "completed"}})
+    assert d["event"] == "agent_status"
+    assert d["id"] == "7"
+    parsed = json.loads(d["data"])
+    assert parsed == {"agent": "市场分析师", "status": "completed"}
+    assert "市场分析师" in d["data"]  # ensure_ascii=False keeps CJK
 
 
 def test_event_buffer_stores_events():
@@ -59,8 +69,9 @@ async def test_sse_stream_replays_after_last_id():
     out = [chunk async for chunk in sse_stream(buf, last_id=1)]
     # events 2 and 3 only, then return on done
     assert len(out) == 2
-    assert "report_section" in out[0]
-    assert "event: done" in out[1]
+    assert out[0]["event"] == "report_section"
+    assert out[0]["id"] == "2"
+    assert out[1]["event"] == "done"
 
 
 @pytest.mark.asyncio
@@ -69,7 +80,8 @@ async def test_sse_stream_terminates_on_error():
     buf.add("error", {"message": "boom"})
     out = [c async for c in sse_stream(buf, 0)]
     assert len(out) == 1
-    assert "event: error" in out[0]
+    assert out[0]["event"] == "error"
+    assert json.loads(out[0]["data"]) == {"message": "boom"}
 
 
 @pytest.mark.asyncio
@@ -91,6 +103,6 @@ async def test_sse_stream_no_event_loss_across_reconnect():
     # Reconnect with Last-Event-ID = 2
     second = [c async for c in sse_stream(buf, 2)]
     assert len(second) == 2          # exactly events 3 and 4, no duplication
-    assert "id: 3" in second[0]
-    assert "report_section" in second[0]
-    assert "event: done" in second[1]
+    assert second[0]["id"] == "3"
+    assert second[0]["event"] == "report_section"
+    assert second[1]["event"] == "done"
