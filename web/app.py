@@ -35,7 +35,7 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _loop
-    _loop = asyncio.get_event_loop()
+    _loop = asyncio.get_running_loop()
     yield
 
 
@@ -186,6 +186,11 @@ def _run_analysis_thread(
         init_state = graph.propagator.create_initial_state(ticker, date)
         args = graph.propagator.get_graph_args()
 
+        # NOTE: stop_event is only checked between chunks. A watchdog timeout
+        # fired during a single blocked LLM call cannot interrupt that call;
+        # the job lock is still released and an error is emitted to the client,
+        # but this daemon thread keeps running until the LLM call returns.
+        # Accepted limitation (see spec "超出范围").
         for chunk in graph.graph.stream(init_state, **args):
             if stop_event.is_set():
                 break

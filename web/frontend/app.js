@@ -8,6 +8,21 @@ const AGENT_TEAMS = [
   { label: "交易/风控/组合", agents: ["Trader", "Aggressive Analyst", "Neutral Analyst", "Conservative Analyst", "Portfolio Manager"] },
 ];
 
+const AGENT_NAME_ZH = {
+  "Market Analyst": "市场分析师",
+  "Sentiment Analyst": "情绪分析师",
+  "News Analyst": "新闻分析师",
+  "Fundamentals Analyst": "基本面分析师",
+  "Bull Researcher": "多头研究员",
+  "Bear Researcher": "空头研究员",
+  "Research Manager": "研究经理",
+  "Trader": "交易员",
+  "Aggressive Analyst": "激进分析师",
+  "Neutral Analyst": "中性分析师",
+  "Conservative Analyst": "保守分析师",
+  "Portfolio Manager": "投资组合经理",
+};
+
 const SECTION_LABELS = {
   market_report: "市场分析报告",
   sentiment_report: "情绪分析报告",
@@ -75,7 +90,7 @@ function renderAgentList(agentStatus) {
       item.id = `agent-${agent.replace(/ /g, "-")}`;
       item.innerHTML = `
         <span class="agent-dot ${status}"></span>
-        <span class="agent-name ${status}">${agent}</span>
+        <span class="agent-name ${status}">${AGENT_NAME_ZH[agent] || agent}</span>
         ${status === "completed" ? '<span class="agent-check">✓</span>' : ""}
         ${status === "in_progress" ? '<span class="agent-check" style="color:var(--amber)">···</span>' : ""}
       `;
