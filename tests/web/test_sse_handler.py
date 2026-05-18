@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from web.sse_handler import EventBuffer, format_sse
+from web.sse_handler import EventBuffer, format_sse, sse_stream
 
 
 def test_format_sse_basic():
@@ -43,11 +43,54 @@ def test_event_buffer_replay_from_zero_returns_all():
     assert len(buf.get_events_after(0)) == 2
 
 
-@pytest.mark.asyncio
-async def test_queue_receives_event():
+def test_add_sets_wakeup():
     buf = EventBuffer()
-    loop = asyncio.get_event_loop()
+    assert not buf.wakeup.is_set()
+    buf.add("agent_status", {"agent": "A", "status": "pending"})
+    assert buf.wakeup.is_set()
 
-    loop.call_soon_threadsafe(buf.queue.put_nowait, {"type": "agent_status", "data": {"agent": "A", "status": "pending"}})
-    event = await asyncio.wait_for(buf.queue.get(), timeout=1.0)
-    assert event["type"] == "agent_status"
+
+@pytest.mark.asyncio
+async def test_sse_stream_replays_after_last_id():
+    buf = EventBuffer()
+    buf.add("agent_status", {"agent": "A", "status": "pending"})
+    buf.add("report_section", {"section": "market_report", "content": "x"})
+    buf.add("done", {"job_id": "j"})
+    out = [chunk async for chunk in sse_stream(buf, last_id=1)]
+    # events 2 and 3 only, then return on done
+    assert len(out) == 2
+    assert "report_section" in out[0]
+    assert "event: done" in out[1]
+
+
+@pytest.mark.asyncio
+async def test_sse_stream_terminates_on_error():
+    buf = EventBuffer()
+    buf.add("error", {"message": "boom"})
+    out = [c async for c in sse_stream(buf, 0)]
+    assert len(out) == 1
+    assert "event: error" in out[0]
+
+
+@pytest.mark.asyncio
+async def test_sse_stream_no_event_loss_across_reconnect():
+    # First connection drains events 1..2 then "disconnects" (generator closed)
+    buf = EventBuffer()
+    buf.add("agent_status", {"agent": "A", "status": "pending"})
+    buf.add("agent_status", {"agent": "A", "status": "in_progress"})
+    first = []
+    gen = sse_stream(buf, 0)
+    async for c in gen:
+        first.append(c)
+        if len(first) >= 2:
+            break
+    await gen.aclose()  # simulate client disconnect
+    # Events emitted DURING the disconnect window must survive (C2 fix)
+    buf.add("report_section", {"section": "news_report", "content": "y"})
+    buf.add("done", {"job_id": "j"})
+    # Reconnect with Last-Event-ID = 2
+    second = [c async for c in sse_stream(buf, 2)]
+    assert len(second) == 2          # exactly events 3 and 4, no duplication
+    assert "id: 3" in second[0]
+    assert "report_section" in second[0]
+    assert "event: done" in second[1]

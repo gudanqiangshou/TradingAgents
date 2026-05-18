@@ -16,13 +16,13 @@ if str(_REPO_ROOT) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(_REPO_ROOT / ".env")
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
 
 from web.job_manager import JobManager, JobNotFoundError
-from web.sse_handler import EventBuffer, format_sse
+from web.sse_handler import EventBuffer, sse_stream
 from web.state_tracker import AgentTracker, process_chunk, SIGNAL_ACTION_MAP
 
 # --- Global state ---
@@ -97,7 +97,7 @@ def start_analyze(req: AnalyzeRequest):
 
 
 @app.get("/api/stream/{job_id}")
-async def stream_events(job_id: str, request=None):
+async def stream_events(job_id: str, request: Request):
     try:
         job_mgr.get_status(job_id)
     except JobNotFoundError:
@@ -106,32 +106,12 @@ async def stream_events(job_id: str, request=None):
     if buf is None:
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
 
-    last_id = 0
-    if request is not None:
-        try:
-            last_id = int(request.headers.get("last-event-id", 0))
-        except (ValueError, TypeError):
-            last_id = 0
+    try:
+        last_id = int(request.headers.get("last-event-id", 0))
+    except (ValueError, TypeError):
+        last_id = 0
 
-    async def event_generator():
-        # Replay buffered events for reconnects
-        for event in buf.get_events_after(last_id):
-            yield format_sse(event["type"], event["data"], event["id"])
-
-        # Stream live events
-        while True:
-            try:
-                event = await asyncio.wait_for(buf.queue.get(), timeout=30.0)
-            except asyncio.TimeoutError:
-                yield ": keepalive\n\n"
-                continue
-            buf.add(event["type"], event["data"])
-            stored = buf.events[-1]
-            yield format_sse(stored["type"], stored["data"], stored["id"])
-            if event["type"] in ("done", "error"):
-                break
-
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(sse_stream(buf, last_id))
 
 
 @app.get("/api/report/{job_id}")
@@ -146,11 +126,15 @@ def get_report(job_id: str):
 
 
 def _emit(job_id: str, event_type: str, data: dict) -> None:
-    """Thread-safe emit: bridge sync thread → async queue."""
+    """Thread-safe emit: append to the durable buffer on the event loop.
+
+    Scheduling buf.add via call_soon_threadsafe makes the loop thread the
+    sole mutator of buf.events, so id assignment and the wakeup are race-free.
+    """
     buf = _buffers.get(job_id)
     if buf is None or _loop is None:
         return
-    _loop.call_soon_threadsafe(buf.queue.put_nowait, {"type": event_type, "data": data})
+    _loop.call_soon_threadsafe(buf.add, event_type, data)
 
 
 def _run_analysis_thread(

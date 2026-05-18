@@ -74,3 +74,20 @@ def test_analyze_validates_ticker(client):
         "language": "Chinese",
     })
     assert resp.status_code == 422
+
+
+def test_stream_replays_buffered_events_and_terminates(client):
+    from web import app as app_module
+    with patch("web.app._run_analysis_thread"):
+        resp = client.post("/api/analyze", json={
+            "ticker": "TSLA", "date": "2026-05-18",
+            "analysts": ["market"], "language": "Chinese",
+        })
+    job_id = resp.json()["job_id"]
+    buf = app_module._buffers[job_id]
+    buf.add("agent_status", {"agent": "Market Analyst", "status": "completed"})
+    buf.add("done", {"job_id": job_id})
+    with client.stream("GET", f"/api/stream/{job_id}") as r:
+        body = "".join(r.iter_text())
+    assert "event: agent_status" in body
+    assert "event: done" in body
