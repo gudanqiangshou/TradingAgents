@@ -274,3 +274,46 @@ Please reference our work if you find *TradingAgents* provides you with some hel
       url={https://arxiv.org/abs/2412.20138}, 
 }
 ```
+
+## Web Interface
+
+A browser-based interface is available in `web/`. See `docs/superpowers/specs/2026-05-18-tradingagents-web-design.md` for full architecture details.
+
+### Quick Start (Local)
+
+```bash
+# 1. Install web dependencies
+pip install -r web/requirements.txt
+
+# 2. Copy and configure backend URL
+cp web/frontend/config.js.example web/frontend/config.js
+# Edit config.js: set BACKEND_URL to http://localhost:8000
+
+# 3. Set CORS to allow local file access
+export TRADINGAGENTS_CORS_ORIGINS="*"
+
+# 4. Start backend (from repo root)
+uvicorn web.app:app --host 127.0.0.1 --port 8000
+
+# 5. Open web/frontend/index.html in browser
+```
+
+### Production Deployment (Mac Mini + Cloudflare Tunnel)
+
+```bash
+# Create the log directory the LaunchAgent writes to
+mkdir -p ~/.tradingagents/logs
+
+# Install LaunchAgent
+cp web/launchd/tradingagents-web.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.tradingagents.web.plist
+
+# Set up Cloudflare named tunnel (one-time)
+cloudflared tunnel create tradingagents-web
+cloudflared tunnel route dns tradingagents-web tradingagents-api.yourdomain.com
+cloudflared tunnel run tradingagents-web
+
+# Configure GitHub Pages to serve web/frontend/ from main branch
+# Update config.js with your tunnel URL
+# Set TRADINGAGENTS_CORS_ORIGINS in .env to your GitHub Pages URL
+```
