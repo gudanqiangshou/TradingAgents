@@ -303,22 +303,43 @@ named tunnel. The tunnel URL is the link you share — it works from any network
 no same-WiFi requirement.
 
 ```bash
-# Create the log directory the LaunchAgent writes to
+# Create the log directory the LaunchAgents write to
 mkdir -p ~/.tradingagents/logs
 
-# Install + start the backend as a LaunchAgent (auto-starts on login)
+# 1. Backend as a LaunchAgent (auto-starts on login, restarts on crash)
 cp web/launchd/tradingagents-web.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.tradingagents.web.plist
 
-# One-time: create a named tunnel pointing at the local backend
-cloudflared tunnel create tradingagents-web
-cloudflared tunnel route dns tradingagents-web tradingagents.yourdomain.com
+# 2. One-time named-tunnel setup (stable URL; needs a domain on Cloudflare)
+cloudflared tunnel login                       # browser auth, pick your zone
+cloudflared tunnel create tradingagents-web    # writes ~/.cloudflared/<uuid>.json
+cloudflared tunnel route dns tradingagents-web ta.yourdomain.com
 
-# Run the tunnel (or install it as a service for persistence)
-cloudflared tunnel run --url http://127.0.0.1:8000 tradingagents-web
+# 3. ~/.cloudflared/config.yml  (protocol: http2 — some networks block QUIC/UDP)
+cat > ~/.cloudflared/config.yml <<'YAML'
+tunnel: <uuid-from-create>
+credentials-file: /Users/<you>/.cloudflared/<uuid>.json
+protocol: http2
+ingress:
+  - hostname: ta.yourdomain.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+YAML
+
+# 4. Tunnel as a LaunchAgent (persistent, runs the named tunnel by name)
+cp web/launchd/tradingagents-tunnel.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.tradingagents.tunnel.plist
 ```
 
-Share `https://tradingagents.yourdomain.com` (or the
-`*.trycloudflare.com` URL a quick tunnel prints). Anyone with the link reaches
-the same page and API. The Mac Mini must be online for the link to work — which
-it must be anyway, since it runs the analysis.
+Share `https://ta.yourdomain.com`. Anyone with the link reaches the same page
+and API; the Mac Mini must be online (it runs the analysis anyway).
+
+### Access password (protect your LLM budget)
+
+The site has no accounts. Set `TRADINGAGENTS_WEB_PASSWORD` in `.env` (gitignored)
+to gate `POST /api/analyze` — the only endpoint that spends LLM tokens. The
+check is server-side (constant-time compare); the frontend shows a password
+overlay and re-prompts on a 401. Unset = no gate (local dev). `/api/stream` and
+`/api/report` need a job id that only an authorized analyze hands out, so
+gating analyze gates the whole flow. Change the password by editing `.env` and
+`launchctl kickstart -k gui/$(id -u)/com.tradingagents.web`.
