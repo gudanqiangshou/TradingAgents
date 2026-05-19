@@ -60,16 +60,22 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".pill").forEach(btn => {
     btn.addEventListener("click", () => btn.classList.toggle("active"));
   });
-  document.getElementById("auth-input").addEventListener("keydown", e => {
-    if (e.key === "Enter") submitAuth();
-  });
   // Wire handlers here (no inline onclick) so a strict CSP can forbid
   // inline script and block any injected <script>/event-handler payload.
+  // Auth is now a <form>; handle submit (covers Enter + the button) and
+  // preventDefault so it never navigates/reloads.
+  document.getElementById("auth-form").addEventListener("submit", e => {
+    e.preventDefault();
+    submitAuth();
+  });
   document.getElementById("submit-btn").addEventListener("click", startAnalysis);
   document.getElementById("history-btn").addEventListener("click", openHistory);
-  document.getElementById("auth-btn").addEventListener("click", submitAuth);
   document.getElementById("history-close").addEventListener("click", closeHistory);
   document.getElementById("collapse-btn").addEventListener("click", toggleProgress);
+  // Click the dark backdrop (outside the box) to close the history overlay.
+  document.getElementById("history-overlay").addEventListener("click", e => {
+    if (e.target.id === "history-overlay") closeHistory();
+  });
   renderAgentList({});
   showDecisionCard("pending", null);
   // Show the password gate until the user has entered one this session.
