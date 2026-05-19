@@ -10,6 +10,10 @@ def client():
     from web import app as app_module
     app_module.job_mgr._jobs.clear()
     app_module.job_mgr._running_job_id = None
+    # Gate OFF by default so tests are deterministic regardless of whether
+    # the developer's real .env sets TRADINGAGENTS_WEB_PASSWORD (app.py loads
+    # .env at import). Gate-specific tests monkeypatch WEB_PASSWORD back on.
+    app_module.WEB_PASSWORD = ""
     from web.app import app
     return TestClient(app)
 

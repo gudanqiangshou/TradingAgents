@@ -62,7 +62,49 @@ window.addEventListener("DOMContentLoaded", () => {
   if (!sessionStorage.getItem("ta_pw")) {
     document.getElementById("auth-overlay").classList.remove("hidden");
   }
+  // After a refresh / reopen, reconnect to the last analysis if there was
+  // one. The backend keeps a durable event buffer + the final report, so a
+  // running job replays its progress and a finished job shows its result.
+  restoreSession();
 });
+
+async function restoreSession() {
+  const jobId = localStorage.getItem("ta_job");
+  if (!jobId) return;
+  let resp;
+  try {
+    resp = await fetch(`/api/report/${jobId}`);
+  } catch {
+    return;  // backend unreachable; leave the idle screen, user can retry
+  }
+  if (resp.status === 200) {
+    // Job finished — render the stored report and its decision.
+    const { content } = await resp.json();
+    state.jobId = jobId;
+    const cards = document.getElementById("report-cards");
+    cards.innerHTML =
+      '<div class="report-card"><div class="report-card-header">' +
+      '<span class="report-card-title completed">✓ 上次分析报告（已完成）</span>' +
+      '</div><div class="report-card-body">' + marked.parse(content) +
+      '</div></div>';
+    const m = content.match(/最终交易决策[\s\S]*?\*\*(BUY|SELL|HOLD)\*\*/);
+    if (m) showDecisionCard("final", { action: m[1], raw: content });
+    setStatus("已恢复上次分析结果", "");
+    showDownloadButton(jobId);
+    return;
+  }
+  let detail = "";
+  try { detail = (await resp.json()).detail || ""; } catch {}
+  if (detail.includes("尚未生成")) {
+    // Job still running — replay buffered progress + continue live.
+    state.jobId = jobId;
+    setStatus("正在恢复进行中的分析...", "");
+    connectSSE(jobId);
+  } else {
+    // Job unknown / expired (e.g. backend restarted) — forget it.
+    localStorage.removeItem("ta_job");
+  }
+}
 
 function submitAuth() {
   const val = document.getElementById("auth-input").value;
@@ -227,6 +269,9 @@ async function startAnalysis() {
 
   const { job_id } = await resp.json();
   state.jobId = job_id;
+  // Remember the job so a refresh / reopen can reconnect to it. Overwritten
+  // by the next analysis; cleared only if the backend later forgets the job.
+  localStorage.setItem("ta_job", job_id);
   setStatus(`分析中 · ${ticker}`, "约需 3-8 分钟");
   connectSSE(job_id);
 }
