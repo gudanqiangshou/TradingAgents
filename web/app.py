@@ -48,7 +48,13 @@ from web.state_tracker import AgentTracker, process_chunk, SIGNAL_ACTION_MAP
 _log = logging.getLogger("tradingagents.web")
 
 # --- Global state ---
-job_mgr = JobManager(watchdog_timeout=600.0)
+# A full multi-analyst pipeline (4 analysts + research debate + trader + 3
+# risk debators + portfolio) via DeepSeek is slow: ~10 min just for
+# analysts+research, so 600s killed every 4-analyst run before the Trader
+# ever ran. 30 min lets the full pipeline finish; still bounded so a truly
+# hung run can't hold the single slot forever. Override via env if needed.
+_WATCHDOG_SEC = float(os.environ.get("TRADINGAGENTS_WEB_WATCHDOG_SEC", "1800"))
+job_mgr = JobManager(watchdog_timeout=_WATCHDOG_SEC)
 _buffers: dict[str, EventBuffer] = {}
 _MAX_BUFFERS = 20
 _MAX_REPORT_CHARS = 2_000_000  # ~2MB safety cap on a single stored report
@@ -383,7 +389,7 @@ def _run_analysis_thread(
 
         if stop_event.is_set():
             # Timed out / aborted: the watchdog already marked the job ERROR.
-            _emit(job_id, "error", {"message": "分析超时或被中止，请重试"})
+            _emit(job_id, "error", {"message": "分析超时（超过 30 分钟）或被中止。多分析师全流程很慢，建议减少分析师（如只选 市场+新闻）后重试。"})
             return
 
         # The graph ran to END but, with no final trade decision, the
@@ -432,7 +438,7 @@ def _run_analysis_thread(
         if job_mgr.get_status(job_id) == JobStatus.DONE:
             _emit(job_id, "done", {"job_id": job_id})
         else:
-            _emit(job_id, "error", {"message": "分析超时或被中止，请重试"})
+            _emit(job_id, "error", {"message": "分析超时（超过 30 分钟）或被中止。多分析师全流程很慢，建议减少分析师（如只选 市场+新闻）后重试。"})
 
     except Exception as exc:
         try:

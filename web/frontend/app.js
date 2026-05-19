@@ -290,7 +290,8 @@ async function startAnalysis() {
   // Remember the job so a refresh / reopen can reconnect to it. Overwritten
   // by the next analysis; cleared only if the backend later forgets the job.
   localStorage.setItem("ta_job", job_id);
-  setStatus(`分析中 · ${ticker}`, "约需 3-8 分钟");
+  setStatus(`分析中 · ${ticker}`,
+    "分析师越多越久（1个约5分钟，4个约15-25分钟）。可关闭页面，完成后到「历史」查看。");
   connectSSE(job_id);
 }
 
