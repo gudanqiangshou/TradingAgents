@@ -43,6 +43,8 @@
       </select>
     </div>
     <button id="submit-btn" class="submit-btn" onclick="startAnalysis()">开始分析</button>
+    <button id="history-btn" class="submit-btn" style="background:#374151"
+            onclick="openHistory()">📋 历史</button>
   </div>
 
   <!-- Busy Overlay -->
@@ -58,6 +60,17 @@
              placeholder="请输入口令" autocomplete="off">
       <div id="auth-error" class="auth-error"></div>
       <button id="auth-btn" class="submit-btn" onclick="submitAuth()">进入</button>
+    </div>
+  </div>
+
+  <!-- History Overlay -->
+  <div id="history-overlay" class="busy-overlay hidden">
+    <div class="history-box">
+      <div class="history-head">
+        <span class="auth-title">历史记录</span>
+        <button class="collapse-btn" onclick="closeHistory()">✕</button>
+      </div>
+      <div id="history-list" class="history-list"></div>
     </div>
   </div>
 

@@ -76,6 +76,27 @@ html, body { height: 100%; background: var(--bg-base); color: var(--text-primary
   padding: 10px 12px; outline: none; }
 .auth-input:focus { border-color: var(--accent); }
 .auth-error { color: var(--red); font-size: 11px; min-height: 14px; text-align: center; }
+.history-box { background: var(--bg-elevated); border: 1px solid var(--border-dim);
+  border-radius: 8px; padding: 18px 20px; width: 460px; max-width: 92vw;
+  max-height: 80vh; display: flex; flex-direction: column; gap: 12px; }
+.history-head { display: flex; align-items: center; justify-content: space-between; }
+.history-list { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.history-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: 6px; cursor: pointer; transition: border-color 0.15s; }
+.history-item:hover { border-color: var(--accent); }
+.history-tk { font-family: monospace; font-weight: 700; color: var(--text-primary);
+  font-size: 13px; min-width: 70px; }
+.history-badge { font-size: 10px; font-weight: 700; padding: 2px 8px;
+  border-radius: 10px; }
+.history-badge.BUY { background: var(--green-bg); color: var(--green); }
+.history-badge.SELL { background: var(--red-bg); color: var(--red); }
+.history-badge.HOLD { background: var(--amber-bg); color: var(--amber); }
+.history-badge.NA { background: var(--border); color: var(--text-dim); }
+.history-meta { margin-left: auto; color: var(--text-dim); font-size: 10px;
+  text-align: right; }
+.history-empty { color: var(--text-dim); font-size: 12px; text-align: center;
+  padding: 24px 0; }
 .hidden { display: none !important; }
 
 /* Main Panel */

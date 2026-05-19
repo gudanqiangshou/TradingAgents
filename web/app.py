@@ -40,6 +40,7 @@ class NoCacheStaticFiles(StaticFiles):
         return resp
 from sse_starlette.sse import EventSourceResponse
 
+from web import history
 from web.job_manager import JobManager, JobNotFoundError
 from web.sse_handler import EventBuffer, sse_stream
 from web.state_tracker import AgentTracker, process_chunk, SIGNAL_ACTION_MAP
@@ -179,6 +180,27 @@ def get_report(job_id: str):
     return {"content": report}
 
 
+@app.get("/api/history")
+def get_history(x_access_password: str | None = Header(default=None)):
+    # Gated like /api/analyze: past analyses are as private as the ability to
+    # run them, and they are not protected by a job-id capability the way
+    # /api/stream and /api/report are.
+    _check_access(x_access_password)
+    return {"items": history.list_history()}
+
+
+@app.get("/api/history/{entry_id}")
+def get_history_report(
+    entry_id: str,
+    x_access_password: str | None = Header(default=None),
+):
+    _check_access(x_access_password)
+    content = history.get_report(entry_id)
+    if content is None:
+        raise HTTPException(status_code=404, detail="历史记录不存在")
+    return {"content": content}
+
+
 def _emit(job_id: str, event_type: str, data: dict) -> None:
     """Thread-safe emit: append to the durable buffer on the event loop.
 
@@ -242,6 +264,7 @@ def _run_analysis_thread(
 
         # Final decision
         final_decision = tracker.report_sections.get("final_trade_decision") or ""
+        action = "—"
         if final_decision:
             raw_signal = SignalProcessor().process_signal(final_decision)
             action = SIGNAL_ACTION_MAP.get(raw_signal or "", "HOLD")
@@ -250,6 +273,13 @@ def _run_analysis_thread(
 
         full_report = "\n\n".join(final_report_parts)
         job_mgr.set_report(job_id, full_report)
+        # Persist to disk so the analysis survives a backend restart and shows
+        # up in the browsable history. Never let a persistence failure abort
+        # the job — the in-memory result + SSE stream still work.
+        try:
+            history.save_analysis(ticker, date, action, full_report)
+        except Exception:
+            pass
         job_mgr.finish_job(job_id)
         _emit(job_id, "done", {"job_id": job_id})
 

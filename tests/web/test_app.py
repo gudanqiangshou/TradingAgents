@@ -217,3 +217,43 @@ def test_gate_accepts_correct_password(client, monkeypatch):
         }, headers={"X-Access-Password": "s3cret"})
     assert resp.status_code == 200
     assert "job_id" in resp.json()
+
+
+@pytest.fixture
+def seeded_history(tmp_path, monkeypatch):
+    from web import history
+    d = tmp_path / "web"
+    monkeypatch.setattr(history, "HISTORY_DIR", d)
+    monkeypatch.setattr(history, "_INDEX", d / "history.json")
+    e1 = history.save_analysis("AAPL", "2026-05-19", "BUY", "# AAPL\nbody")
+    e2 = history.save_analysis("TSLA", "2026-05-19", "SELL", "# TSLA\nbody")
+    return e1, e2
+
+
+def test_history_list_returns_entries(client, seeded_history):
+    e1, e2 = seeded_history
+    resp = client.get("/api/history")
+    assert resp.status_code == 200
+    ids = [i["id"] for i in resp.json()["items"]]
+    assert ids == [e2["id"], e1["id"]]  # newest first
+
+
+def test_history_report_roundtrip(client, seeded_history):
+    e1, _ = seeded_history
+    resp = client.get(f"/api/history/{e1['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["content"] == "# AAPL\nbody"
+
+
+def test_history_unknown_returns_404(client, seeded_history):
+    resp = client.get("/api/history/NOPE_20260101-000000")
+    assert resp.status_code == 404
+
+
+def test_history_endpoints_gated(client, monkeypatch, seeded_history):
+    from web import app as app_module
+    monkeypatch.setattr(app_module, "WEB_PASSWORD", "s3cret")
+    assert client.get("/api/history").status_code == 401
+    assert client.get(f"/api/history/{seeded_history[0]['id']}").status_code == 401
+    ok = client.get("/api/history", headers={"X-Access-Password": "s3cret"})
+    assert ok.status_code == 200

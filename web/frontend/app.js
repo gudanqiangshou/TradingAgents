@@ -356,3 +356,76 @@ async function showDownloadButton(jobId) {
     document.getElementById("report-cards").prepend(btn);
   } catch {}
 }
+
+// ---- History ----
+function pwHeaders() {
+  return { "X-Access-Password": sessionStorage.getItem("ta_pw") || "" };
+}
+
+async function openHistory() {
+  const overlay = document.getElementById("history-overlay");
+  const list = document.getElementById("history-list");
+  list.innerHTML = '<div class="history-empty">加载中...</div>';
+  overlay.classList.remove("hidden");
+  let resp;
+  try {
+    resp = await fetch("/api/history", { headers: pwHeaders() });
+  } catch {
+    list.innerHTML = '<div class="history-empty">无法连接服务器</div>';
+    return;
+  }
+  if (resp.status === 401) {
+    overlay.classList.add("hidden");
+    showAuthGate("口令错误，请重新输入");
+    return;
+  }
+  const items = (await resp.json()).items || [];
+  if (items.length === 0) {
+    list.innerHTML = '<div class="history-empty">暂无历史记录</div>';
+    return;
+  }
+  list.innerHTML = "";
+  items.forEach(it => {
+    const badge = ["BUY", "SELL", "HOLD"].includes(it.action) ? it.action : "NA";
+    const when = (it.created_at || "").replace("T", " ").slice(0, 16);
+    const row = document.createElement("div");
+    row.className = "history-item";
+    row.innerHTML =
+      `<span class="history-tk">${it.ticker}</span>` +
+      `<span class="history-badge ${badge}">${it.action || "—"}</span>` +
+      `<span class="history-meta">分析日 ${it.date}<br>${when}</span>`;
+    row.onclick = () => loadHistoryReport(it.id, it.action);
+    list.appendChild(row);
+  });
+}
+
+function closeHistory() {
+  document.getElementById("history-overlay").classList.add("hidden");
+}
+
+async function loadHistoryReport(id, action) {
+  let resp;
+  try {
+    resp = await fetch(`/api/history/${id}`, { headers: pwHeaders() });
+  } catch {
+    return;
+  }
+  if (resp.status === 401) {
+    closeHistory();
+    showAuthGate("口令错误，请重新输入");
+    return;
+  }
+  if (!resp.ok) return;
+  const { content } = await resp.json();
+  closeHistory();
+  document.getElementById("report-cards").innerHTML =
+    '<div class="report-card"><div class="report-card-header">' +
+    `<span class="report-card-title completed">✓ 历史报告 · ${id}</span>` +
+    '</div><div class="report-card-body">' + marked.parse(content) +
+    '</div></div>';
+  const m = content.match(/最终交易决策[\s\S]*?\*\*(BUY|SELL|HOLD)\*\*/);
+  if (m) showDecisionCard("final", { action: m[1], raw: content });
+  else if (["BUY", "SELL", "HOLD"].includes(action))
+    showDecisionCard("final", { action, raw: content });
+  setStatus(`已打开历史报告 · ${id}`, "");
+}

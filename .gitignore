@@ -220,3 +220,6 @@ __marimo__/
 
 # Git worktrees
 .worktrees/
+
+# Web analysis history / runtime reports (private, not for the public fork)
+reports/
