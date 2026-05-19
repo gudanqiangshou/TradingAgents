@@ -21,6 +21,23 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
+from starlette.responses import Response
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """Serve the frontend with Cache-Control: no-cache.
+
+    The site is fronted by a Cloudflare tunnel. Cloudflare edge-caches static
+    extensions (.js/.css) by default for hours, so a deploy would otherwise
+    keep serving stale UI until the edge TTL expired. Cloudflare honours an
+    origin `no-cache`, so every fetch revalidates against the ETag FastAPI
+    already sends (still 304-efficient when unchanged, always fresh on deploy).
+    """
+
+    def file_response(self, *args, **kwargs) -> Response:
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 from sse_starlette.sse import EventSourceResponse
 
 from web.job_manager import JobManager, JobNotFoundError
@@ -250,6 +267,6 @@ def _run_analysis_thread(
 # CORS and no separate frontend host — one Cloudflare tunnel serves it all.
 app.mount(
     "/",
-    StaticFiles(directory=str(_REPO_ROOT / "web" / "frontend"), html=True),
+    NoCacheStaticFiles(directory=str(_REPO_ROOT / "web" / "frontend"), html=True),
     name="frontend",
 )

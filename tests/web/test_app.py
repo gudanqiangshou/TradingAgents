@@ -149,6 +149,15 @@ def test_static_assets_served(client):
     assert css.status_code == 200
 
 
+def test_static_assets_sent_no_cache(client):
+    # Cloudflare edge-caches .js/.css for hours by default; the origin must
+    # send no-cache so a deploy is never masked by a stale edge copy.
+    for path in ("/", "/app.js", "/style.css"):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert "no-cache" in r.headers.get("cache-control", "").lower(), path
+
+
 def test_api_routes_take_precedence_over_static_mount(client):
     # The "/" StaticFiles mount must not shadow /api/* routes.
     resp = client.get("/api/report/unknown-id")
