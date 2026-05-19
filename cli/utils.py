@@ -8,6 +8,7 @@ from rich.console import Console
 
 from cli.models import AnalystType, AssetType
 from tradingagents.llm_clients.api_key_env import get_api_key_env
+from tradingagents.market_resolver import Market, resolve_market
 from tradingagents.llm_clients.model_catalog import get_model_options
 
 console = Console()
@@ -50,8 +51,8 @@ def normalize_ticker_symbol(ticker: str) -> str:
 
 
 def detect_asset_type(ticker: str) -> AssetType:
-    normalized_ticker = ticker.strip().upper()
-    if normalized_ticker.endswith(CRYPTO_SUFFIXES):
+    market = resolve_market(ticker)
+    if market == Market.CRYPTO:
         return AssetType.CRYPTO
     return AssetType.STOCK
 
