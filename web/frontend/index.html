@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TradingAgents — 多智能体金融分析</title>
   <link rel="stylesheet" href="style.css?v=2">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="vendor/marked-12.0.2.min.js"></script>
+  <script src="vendor/purify-3.1.7.min.js"></script>
 </head>
 <body>
   <!-- Top Nav -->
@@ -42,9 +43,8 @@
         <option value="English">🌐 English</option>
       </select>
     </div>
-    <button id="submit-btn" class="submit-btn" onclick="startAnalysis()">开始分析</button>
-    <button id="history-btn" class="submit-btn" style="background:#374151"
-            onclick="openHistory()">📋 历史</button>
+    <button id="submit-btn" class="submit-btn">开始分析</button>
+    <button id="history-btn" class="submit-btn" style="background:#374151">📋 历史</button>
   </div>
 
   <!-- Busy Overlay -->
@@ -59,7 +59,7 @@
       <input id="auth-input" class="auth-input" type="password"
              placeholder="请输入口令" autocomplete="off">
       <div id="auth-error" class="auth-error"></div>
-      <button id="auth-btn" class="submit-btn" onclick="submitAuth()">进入</button>
+      <button id="auth-btn" class="submit-btn">进入</button>
     </div>
   </div>
 
@@ -68,7 +68,7 @@
     <div class="history-box">
       <div class="history-head">
         <span class="auth-title">历史记录</span>
-        <button class="collapse-btn" onclick="closeHistory()">✕</button>
+        <button id="history-close" class="collapse-btn">✕</button>
       </div>
       <div id="history-list" class="history-list"></div>
     </div>
@@ -80,7 +80,7 @@
     <div class="progress-panel">
       <div class="progress-header">
         <span class="panel-title">智能体进度</span>
-        <button class="collapse-btn" id="collapse-btn" onclick="toggleProgress()">▾</button>
+        <button class="collapse-btn" id="collapse-btn">▾</button>
       </div>
       <div id="progress-body">
         <div class="progress-bar-row">
@@ -111,6 +111,6 @@
     <span id="status-hint"></span>
   </div>
 
-  <script src="app.js?v=2">
+  <script src="app.js?v=2"></script>
 </body>
 </html>

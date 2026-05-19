@@ -115,8 +115,10 @@ def test_buffer_eviction_caps_memory(client):
                 "analysts": ["market"], "language": "Chinese",
             })
             jid = r.json()["job_id"]
-            # finish each job so the next POST is allowed and FIFO eviction applies
+            # finish + release so the next POST is allowed (worker would
+            # call release() in its finally; the thread is mocked here)
             app_module.job_mgr.finish_job(jid)
+            app_module.job_mgr.release(jid)
     assert len(app_module._buffers) <= app_module._MAX_BUFFERS
 
 
@@ -156,6 +158,26 @@ def test_static_assets_sent_no_cache(client):
         r = client.get(path)
         assert r.status_code == 200
         assert "no-cache" in r.headers.get("cache-control", "").lower(), path
+
+
+def test_security_headers_present(client):
+    r = client.get("/")
+    csp = r.headers.get("content-security-policy", "")
+    assert "default-src 'self'" in csp
+    assert "script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("style-src")[0]
+    assert "frame-ancestors 'none'" in csp
+    assert r.headers.get("x-content-type-options") == "nosniff"
+    assert r.headers.get("x-frame-options") == "DENY"
+
+
+def test_index_has_no_inline_handlers(client):
+    # CSP script-src 'self' only protects us if the HTML has no inline JS.
+    html = client.get("/").text
+    assert "onclick=" not in html
+    assert "cdn.jsdelivr.net" not in html  # libs are vendored + pinned
+    assert "vendor/marked-12.0.2.min.js" in html
+    assert "vendor/purify-3.1.7.min.js" in html
+    assert '<script src="app.js?v=' in html and "</script>" in html.split("app.js?v=")[1]
 
 
 def test_index_stamps_dynamic_asset_version(client):
@@ -257,3 +279,77 @@ def test_history_endpoints_gated(client, monkeypatch, seeded_history):
     assert client.get(f"/api/history/{seeded_history[0]['id']}").status_code == 401
     ok = client.get("/api/history", headers={"X-Access-Password": "s3cret"})
     assert ok.status_code == 200
+
+
+def test_report_endpoint_gated(client, monkeypatch):
+    from web import app as app_module
+    monkeypatch.setattr(app_module, "WEB_PASSWORD", "s3cret")
+    with patch("web.app._run_analysis_thread"):
+        jid = client.post("/api/analyze", json={
+            "ticker": "TSLA", "date": "2026-05-18",
+            "analysts": ["market"], "language": "Chinese",
+        }, headers={"X-Access-Password": "s3cret"}).json()["job_id"]
+    app_module.job_mgr.finish_job(jid)
+    app_module.job_mgr.set_report(jid, "# R")
+    assert client.get(f"/api/report/{jid}").status_code == 401
+    ok = client.get(f"/api/report/{jid}", headers={"X-Access-Password": "s3cret"})
+    assert ok.status_code == 200 and ok.json()["content"] == "# R"
+
+
+def test_fail_closed_refuses_to_start_without_password(monkeypatch):
+    from web import app as app_module
+    monkeypatch.setattr(app_module, "WEB_REQUIRE_PASSWORD", True)
+    monkeypatch.setattr(app_module, "WEB_PASSWORD", "")
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        with TestClient(app_module.app):  # triggers lifespan startup
+            pass
+
+
+def test_fail_closed_ok_when_password_present(monkeypatch):
+    from web import app as app_module
+    monkeypatch.setattr(app_module, "WEB_REQUIRE_PASSWORD", True)
+    monkeypatch.setattr(app_module, "WEB_PASSWORD", "x")
+    with TestClient(app_module.app) as c:  # lifespan must NOT raise
+        assert c.get("/").status_code == 200
+
+
+def test_validation_rejects_bad_inputs(client):
+    base = {"ticker": "TSLA", "date": "2026-05-18",
+            "analysts": ["market"], "language": "Chinese"}
+    bad = [
+        {**base, "ticker": "../etc"},
+        {**base, "ticker": "..A"},
+        {**base, "ticker": ".AAPL"},
+        {**base, "date": "2026/05/18"},
+        {**base, "date": "2026-13-40"},
+        {**base, "date": "2999-01-01"},          # future
+        {**base, "analysts": []},
+        {**base, "analysts": ["market", "bogus"]},
+        {**base, "language": "Français"},
+    ]
+    for body in bad:
+        assert client.post("/api/analyze", json=body).status_code == 422, body
+
+
+def test_analysts_deduped(client):
+    with patch("web.app._run_analysis_thread"):
+        r = client.post("/api/analyze", json={
+            "ticker": "TSLA", "date": "2026-05-18",
+            "analysts": ["market", "market", "news"], "language": "Chinese",
+        })
+    assert r.status_code == 200
+
+
+def test_resolve_asset_crypto_drops_fundamentals():
+    from web.app import resolve_asset
+    at, al = resolve_asset("BTC-USD", ["market", "fundamentals", "news"])
+    assert at == "crypto" and "fundamentals" not in al and al == ["market", "news"]
+    at2, al2 = resolve_asset("AAPL", ["market", "fundamentals"])
+    assert at2 == "stock" and al2 == ["market", "fundamentals"]
+
+
+def test_history_limit_clamped(client, seeded_history, monkeypatch):
+    r = client.get("/api/history?limit=99999")
+    assert r.status_code == 200  # clamped server-side, no error
+    r2 = client.get("/api/history?limit=0")
+    assert r2.status_code == 200

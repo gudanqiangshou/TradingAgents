@@ -40,24 +40,56 @@ def test_finish_job_sets_done():
     assert mgr.get_status(job_id) == JobStatus.DONE
 
 
-def test_finish_job_releases_lock():
+def test_finish_then_release_frees_lock():
     mgr = JobManager()
     job1 = mgr.create_job()
     job2 = mgr.create_job()
     mgr.start_job(job1)
     mgr.finish_job(job1)
-    mgr.start_job(job2)  # should not raise
+    # finish_job alone does NOT free the slot — only the worker's release().
+    with pytest.raises(RuntimeError, match="already running"):
+        mgr.start_job(job2)
+    mgr.release(job1)
+    mgr.start_job(job2)  # now free
     assert mgr.get_status(job2) == JobStatus.RUNNING
 
 
-def test_error_job_releases_lock():
+def test_error_does_not_free_lock_until_release():
     mgr = JobManager()
     job_id = mgr.create_job()
     mgr.start_job(job_id)
     mgr.error_job(job_id, "something failed")
     assert mgr.get_status(job_id) == JobStatus.ERROR
     job2 = mgr.create_job()
-    mgr.start_job(job2)  # lock released
+    # Slot still held: a zombie worker may still be running.
+    with pytest.raises(RuntimeError, match="already running"):
+        mgr.start_job(job2)
+    mgr.release(job_id)
+    mgr.start_job(job2)  # freed only after the worker exits
+
+
+def test_finish_cannot_override_error():
+    mgr = JobManager()
+    job_id = mgr.create_job()
+    mgr.start_job(job_id)
+    mgr.error_job(job_id, "boom")
+    mgr.finish_job(job_id)  # must NOT flip ERROR -> DONE
+    assert mgr.get_status(job_id) == JobStatus.ERROR
+
+
+def test_watchdog_timeout_holds_lock_until_release():
+    mgr = JobManager(watchdog_timeout=0.1)
+    job_id = mgr.create_job()
+    mgr.start_job(job_id)
+    time.sleep(0.3)
+    assert mgr.get_stop_event(job_id).is_set()
+    assert mgr.get_status(job_id) == JobStatus.ERROR
+    job2 = mgr.create_job()
+    # Watchdog must NOT free the slot (zombie LLM thread may still run).
+    with pytest.raises(RuntimeError, match="already running"):
+        mgr.start_job(job2)
+    mgr.release(job_id)
+    mgr.start_job(job2)
 
 
 def test_get_status_unknown_raises():

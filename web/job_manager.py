@@ -43,6 +43,9 @@ class _Job:
             self._watchdog_timer.cancel()
 
 
+_MAX_JOBS = 50  # cap retained in-memory jobs so _jobs can't grow unbounded
+
+
 class JobManager:
     def __init__(self, watchdog_timeout: float = 600.0):
         self._jobs: dict[str, _Job] = {}
@@ -54,6 +57,18 @@ class JobManager:
         """Create a new PENDING job and return its id."""
         job_id = str(uuid.uuid4())
         self._jobs[job_id] = _Job(job_id, self._watchdog_timeout)
+        # Evict oldest finished jobs (dict is insertion-ordered) so memory is
+        # bounded; never evict the currently running job. Persisted history
+        # on disk is the durable record, so dropping old in-memory jobs is
+        # safe — only the most recent job's live SSE replay needs them.
+        while len(self._jobs) > _MAX_JOBS:
+            for oid in list(self._jobs):
+                if oid != self._running_job_id and oid != job_id:
+                    self._jobs[oid].cancel_watchdog()
+                    del self._jobs[oid]
+                    break
+            else:
+                break
         return job_id
 
     def _get(self, job_id: str) -> _Job:
@@ -74,22 +89,32 @@ class JobManager:
             job.start_watchdog(lambda: self._watchdog_fire(job_id))
 
     def _watchdog_fire(self, job_id: str) -> None:
-        try:
-            job = self._get(job_id)
+        # Timeout: signal stop and mark ERROR, but DO NOT free the capacity
+        # slot. The worker thread may still be blocked inside an LLM call;
+        # releasing here would let a second analysis start and burn budget
+        # concurrently with the zombie. The slot frees only when the worker
+        # actually exits and calls release(). Trade-off: a truly hung LLM
+        # call blocks new jobs until the next backend restart — which is
+        # safer than concurrent spend, and launchd restarts on deploy/crash.
+        with self._lock:
+            try:
+                job = self._get(job_id)
+            except JobNotFoundError:
+                return
             if job.status == JobStatus.RUNNING:
                 job.stop_event.set()
-                self.error_job(job_id, "分析超时（10分钟）")
-        except JobNotFoundError:
-            pass
+                job.cancel_watchdog()
+                job.status = JobStatus.ERROR
+                job.error_message = "分析超时（10分钟）"
 
     def finish_job(self, job_id: str) -> None:
-        """Mark a job as DONE and cancel its watchdog timer."""
+        """Mark a job DONE — but never override an ERROR (e.g. a watchdog
+        timeout that fired while this thread was still finishing)."""
         with self._lock:
             job = self._get(job_id)
             job.cancel_watchdog()
-            job.status = JobStatus.DONE
-            if self._running_job_id == job_id:
-                self._running_job_id = None
+            if job.status != JobStatus.ERROR:
+                job.status = JobStatus.DONE
 
     def error_job(self, job_id: str, message: str = "") -> None:
         """Mark a job as ERROR with an optional error message."""
@@ -98,6 +123,13 @@ class JobManager:
             job.cancel_watchdog()
             job.status = JobStatus.ERROR
             job.error_message = message
+
+    def release(self, job_id: str) -> None:
+        """Free the single-job capacity slot. Called exactly once from the
+        worker thread's finally, so the slot is held until the worker truly
+        exits — never while a timed-out zombie thread is still running.
+        Idempotent."""
+        with self._lock:
             if self._running_job_id == job_id:
                 self._running_job_id = None
 

@@ -56,3 +56,24 @@ def test_index_survives_corruption(hist):
     items = hist.list_history()
     assert items == [{"id": e["id"], "ticker": "TSLA", "date": "2026-05-19",
                       "action": "SELL", "created_at": e["created_at"]}]
+
+
+def test_history_capped_and_old_dirs_pruned(hist, monkeypatch):
+    monkeypatch.setattr(hist, "MAX_HISTORY", 3)
+    ids = [hist.save_analysis("AAA", "2026-05-19", "BUY", f"r{i}")["id"]
+           for i in range(5)]
+    items = hist.list_history()
+    assert len(items) == 3
+    kept = {i["id"] for i in items}
+    assert kept == set(ids[-3:])               # newest 3 kept
+    for old in ids[:2]:                          # oldest 2 dirs deleted
+        assert not (hist.HISTORY_DIR / old).exists()
+    for new in ids[-3:]:
+        assert (hist.HISTORY_DIR / new / "report.md").exists()
+
+
+def test_list_history_limit(hist):
+    for i in range(5):
+        hist.save_analysis("AAA", "2026-05-19", "HOLD", str(i))
+    assert len(hist.list_history(limit=2)) == 2
+    assert len(hist.list_history()) == 5

@@ -13,7 +13,16 @@
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>8000</string>
+    <string>--no-access-log</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Fail-closed: set here (NOT in .env) so the server refuses to start
+         ungated if .env is ever missing/renamed. The password itself lives
+         in .env. -->
+    <key>TRADINGAGENTS_WEB_REQUIRE_PASSWORD</key>
+    <string>1</string>
+  </dict>
   <key>WorkingDirectory</key>
   <string>/Users/a1/TradingAgents</string>
   <key>RunAtLoad</key>

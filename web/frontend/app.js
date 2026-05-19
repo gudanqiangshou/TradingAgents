@@ -1,6 +1,14 @@
 // ---- Single-origin: FastAPI serves this page and the /api/* endpoints,
 // so all requests use relative paths (no BACKEND_URL / config.js needed) ----
 
+// Report/decision text is LLM- and news-derived and may contain raw HTML
+// (e.g. <img onerror=...>). Never put marked output in the DOM unsanitized:
+// an XSS here could read the access password from sessionStorage. All
+// markdown -> HTML goes through this single chokepoint.
+function safeHTML(md) {
+  return DOMPurify.sanitize(marked.parse(md || ""));
+}
+
 // ---- State ----
 const AGENT_TEAMS = [
   { label: "分析师团队", agents: ["Market Analyst", "Sentiment Analyst", "News Analyst", "Fundamentals Analyst"] },
@@ -55,6 +63,13 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("auth-input").addEventListener("keydown", e => {
     if (e.key === "Enter") submitAuth();
   });
+  // Wire handlers here (no inline onclick) so a strict CSP can forbid
+  // inline script and block any injected <script>/event-handler payload.
+  document.getElementById("submit-btn").addEventListener("click", startAnalysis);
+  document.getElementById("history-btn").addEventListener("click", openHistory);
+  document.getElementById("auth-btn").addEventListener("click", submitAuth);
+  document.getElementById("history-close").addEventListener("click", closeHistory);
+  document.getElementById("collapse-btn").addEventListener("click", toggleProgress);
   renderAgentList({});
   showDecisionCard("pending", null);
   // Show the password gate until the user has entered one this session.
@@ -73,9 +88,12 @@ async function restoreSession() {
   if (!jobId) return;
   let resp;
   try {
-    resp = await fetch(`/api/report/${jobId}`);
+    resp = await fetch(`/api/report/${jobId}`, { headers: pwHeaders() });
   } catch {
     return;  // backend unreachable; leave the idle screen, user can retry
+  }
+  if (resp.status === 401) {
+    return;  // need the password first; user enters it, can use 历史 instead
   }
   if (resp.status === 200) {
     // Job finished — render the stored report and its decision.
@@ -85,7 +103,7 @@ async function restoreSession() {
     cards.innerHTML =
       '<div class="report-card"><div class="report-card-header">' +
       '<span class="report-card-title completed">✓ 上次分析报告（已完成）</span>' +
-      '</div><div class="report-card-body">' + marked.parse(content) +
+      '</div><div class="report-card-body">' + safeHTML(content) +
       '</div></div>';
     const m = content.match(/最终交易决策[\s\S]*?\*\*(BUY|SELL|HOLD)\*\*/);
     if (m) showDecisionCard("final", { action: m[1], raw: content });
@@ -196,7 +214,7 @@ function upsertReportCard(section, content, status) {
   const label = SECTION_LABELS[section] || section;
   titleEl.className = `report-card-title ${isInProgress ? "in_progress" : "completed"}`;
   titleEl.textContent = isInProgress ? `⟳ ${label} 生成中` : `✓ ${label}`;
-  bodyEl.innerHTML = marked.parse(content) + (isInProgress ? '<span class="cursor">▌</span>' : "");
+  bodyEl.innerHTML = safeHTML(content) + (isInProgress ? '<span class="cursor">▌</span>' : "");
 }
 
 function showDecisionCard(type, data) {
@@ -211,7 +229,7 @@ function showDecisionCard(type, data) {
   } else {
     card.classList.add(data.action);
     actionEl.textContent = data.action;
-    detailEl.innerHTML = marked.parse(data.raw || "").slice(0, 500);
+    detailEl.innerHTML = safeHTML((data.raw || "").slice(0, 800));
   }
 }
 
@@ -339,7 +357,7 @@ function connectSSE(jobId) {
 
 async function showDownloadButton(jobId) {
   try {
-    const resp = await fetch(`/api/report/${jobId}`);
+    const resp = await fetch(`/api/report/${jobId}`, { headers: pwHeaders() });
     if (!resp.ok) return;
     const { content } = await resp.json();
     const btn = document.createElement("button");
@@ -388,13 +406,21 @@ async function openHistory() {
   items.forEach(it => {
     const badge = ["BUY", "SELL", "HOLD"].includes(it.action) ? it.action : "NA";
     const when = (it.created_at || "").replace("T", " ").slice(0, 16);
+    // Build via DOM API + textContent so server-supplied fields can never
+    // inject markup (defence-in-depth even though they are constrained).
     const row = document.createElement("div");
     row.className = "history-item";
-    row.innerHTML =
-      `<span class="history-tk">${it.ticker}</span>` +
-      `<span class="history-badge ${badge}">${it.action || "—"}</span>` +
-      `<span class="history-meta">分析日 ${it.date}<br>${when}</span>`;
-    row.onclick = () => loadHistoryReport(it.id, it.action);
+    const tk = document.createElement("span");
+    tk.className = "history-tk";
+    tk.textContent = it.ticker || "";
+    const bd = document.createElement("span");
+    bd.className = "history-badge " + badge;
+    bd.textContent = it.action || "—";
+    const meta = document.createElement("span");
+    meta.className = "history-meta";
+    meta.textContent = `分析日 ${it.date || ""} · ${when}`;
+    row.append(tk, bd, meta);
+    row.addEventListener("click", () => loadHistoryReport(it.id, it.action));
     list.appendChild(row);
   });
 }
@@ -418,11 +444,21 @@ async function loadHistoryReport(id, action) {
   if (!resp.ok) return;
   const { content } = await resp.json();
   closeHistory();
-  document.getElementById("report-cards").innerHTML =
-    '<div class="report-card"><div class="report-card-header">' +
-    `<span class="report-card-title completed">✓ 历史报告 · ${id}</span>` +
-    '</div><div class="report-card-body">' + marked.parse(content) +
-    '</div></div>';
+  const card = document.createElement("div");
+  card.className = "report-card";
+  const head = document.createElement("div");
+  head.className = "report-card-header";
+  const title = document.createElement("span");
+  title.className = "report-card-title completed";
+  title.textContent = `✓ 历史报告 · ${id}`;  // id is server-supplied; textContent
+  head.appendChild(title);
+  const body = document.createElement("div");
+  body.className = "report-card-body";
+  body.innerHTML = safeHTML(content);
+  card.append(head, body);
+  const host = document.getElementById("report-cards");
+  host.innerHTML = "";
+  host.appendChild(card);
   const m = content.match(/最终交易决策[\s\S]*?\*\*(BUY|SELL|HOLD)\*\*/);
   if (m) showDecisionCard("final", { action: m[1], raw: content });
   else if (["BUY", "SELL", "HOLD"].includes(action))
