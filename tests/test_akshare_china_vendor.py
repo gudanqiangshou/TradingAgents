@@ -7,8 +7,7 @@ All tests are marked @pytest.mark.unit.
 
 import pytest
 import pandas as pd
-from datetime import datetime
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +86,7 @@ def test_get_stock_data_formats_like_yfinance_contract(fake_ak):
 
 @pytest.mark.unit
 def test_symbol_suffix_stripped_for_akshare(fake_ak):
-    """Strip .SH/.SZ suffixes and whitespace; pass bare 6-digit code to akshare."""
+    """Strip .SH/.SZ/.SS/.BJ suffixes and whitespace; pass bare 6-digit code to akshare."""
     with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=fake_ak):
         from tradingagents.dataflows.akshare_china import get_stock_data
 
@@ -104,6 +103,22 @@ def test_symbol_suffix_stripped_for_akshare(fake_ak):
         get_stock_data(" 600519.sz ", "2026-01-05", "2026-01-09")
         kwargs = fake_ak.stock_zh_a_hist.call_args[1]
         assert kwargs["symbol"] == "600519"
+        assert kwargs["period"] == "daily"
+        assert kwargs["adjust"] == "qfq"
+
+        # .SS suffix (Shanghai, alternate form)
+        fake_ak.reset_mock()
+        get_stock_data("600519.SS", "2026-01-05", "2026-01-09")
+        kwargs = fake_ak.stock_zh_a_hist.call_args[1]
+        assert kwargs["symbol"] == "600519"
+        assert kwargs["period"] == "daily"
+        assert kwargs["adjust"] == "qfq"
+
+        # .BJ suffix (Beijing Stock Exchange)
+        fake_ak.reset_mock()
+        get_stock_data("430047.BJ", "2026-01-05", "2026-01-09")
+        kwargs = fake_ak.stock_zh_a_hist.call_args[1]
+        assert kwargs["symbol"] == "430047"
         assert kwargs["period"] == "daily"
         assert kwargs["adjust"] == "qfq"
 
@@ -176,3 +191,45 @@ def test_non_a_share_symbol_returns_clear_message():
     # Must convey that this vendor handles A-share only
     lower = result.lower()
     assert "a-share" in lower or "a_share" in lower or "a share" in lower
+
+
+@pytest.mark.unit
+def test_akshare_runtime_exception_returns_error_string():
+    """Network/runtime errors from akshare must be caught; function returns error string, never raises."""
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_a_hist.side_effect = ConnectionError("timeout")
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        # Must NOT raise
+        result = _vendor_mod.get_stock_data("600519", "2026-01-05", "2026-01-09")
+
+    assert isinstance(result, str)
+    assert "Error" in result
+    assert "600519" in result
+
+
+@pytest.mark.unit
+def test_invalid_date_returns_error_string():
+    """Malformed date (e.g. slash-separated) must return an error string, never raise."""
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    ensure_mock = MagicMock()
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        ensure_mock,
+    ):
+        # Must NOT raise
+        result = _vendor_mod.get_stock_data("600519", "2026/01/05", "2026-01-09")
+
+    # Date guard fires before akshare is loaded — ensure must not be called
+    ensure_mock.assert_not_called()
+
+    assert isinstance(result, str)
+    assert "Error" in result
+    assert "2026/01/05" in result

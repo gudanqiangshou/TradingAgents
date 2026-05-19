@@ -46,8 +46,15 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     code = symbol.strip().upper().split(".")[0]
 
     # Validate and convert dates yyyy-mm-dd → YYYYMMDD
-    datetime.strptime(start_date, "%Y-%m-%d")
-    datetime.strptime(end_date, "%Y-%m-%d")
+    # Guard: malformed dates must return an error string, never raise
+    try:
+        datetime.strptime(start_date, "%Y-%m-%d")
+        datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        return (
+            f"Error: invalid date format for {start_date!r} or {end_date!r};"
+            " expected yyyy-mm-dd"
+        )
     ak_start = start_date.replace("-", "")
     ak_end = end_date.replace("-", "")
 
@@ -82,38 +89,41 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
         )
 
     # ------------------------------------------------------------------
-    # Rename Chinese columns → standard names, keep only OHLCV
+    # Shape the DataFrame — guard against unexpected akshare column schema
     # ------------------------------------------------------------------
-    col_map = {
-        "日期": "Date",
-        "开盘": "Open",
-        "收盘": "Close",
-        "最高": "High",
-        "最低": "Low",
-        "成交量": "Volume",
-    }
-    df = df.rename(columns=col_map)
-    df = df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
+    try:
+        col_map = {
+            "日期": "Date",
+            "开盘": "Open",
+            "收盘": "Close",
+            "最高": "High",
+            "最低": "Low",
+            "成交量": "Volume",
+        }
+        df = df.rename(columns=col_map)
+        df = df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
 
-    # Coerce numerics
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Coerce numerics
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Sort ascending by date, set Date as index
-    df = df.sort_values("Date").reset_index(drop=True)
-    df = df.set_index("Date")
-    df.index.name = "Date"
+        # Sort ascending by date, set Date as index
+        df = df.sort_values("Date").reset_index(drop=True)
+        df = df.set_index("Date")
+        df.index.name = "Date"
 
-    # Round OHLC to 2 dp
-    for col in ["Open", "High", "Low", "Close"]:
-        df[col] = df[col].round(2)
+        # Round OHLC to 2 dp
+        for col in ["Open", "High", "Low", "Close"]:
+            df[col] = df[col].round(2)
+    except Exception as exc:
+        return f"Error: unexpected A-share data schema for {symbol}: {exc}"
 
     # ------------------------------------------------------------------
     # Build output string  (same contract as yfinance vendor)
     # ------------------------------------------------------------------
     retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = (
-        f"# Stock data for {symbol.strip().split('.')[0].upper()} from {start_date} to {end_date}\n"
+        f"# Stock data for {code} from {start_date} to {end_date}\n"
         f"# Total records: {len(df)}\n"
         f"# Data retrieved on: {retrieved_at}\n"
         "\n"
