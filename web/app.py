@@ -261,12 +261,47 @@ def _run_analysis_thread(
             pass
 
 
-# Serve the static frontend from the same origin as the API. Mounted last so
-# the /api/* routes above take precedence; everything else (/, /index.html,
-# /style.css, /app.js) is served from web/frontend/. Single-origin means no
-# CORS and no separate frontend host — one Cloudflare tunnel serves it all.
+_FRONTEND_DIR = _REPO_ROOT / "web" / "frontend"
+
+
+def _asset_version() -> str:
+    """Cache-bust token = newest mtime of the frontend assets.
+
+    Cloudflare's zone default overrides the origin `no-cache` and edge-caches
+    .js/.css for hours, so after a deploy users keep the old UI. `/` is HTML
+    and Cloudflare does NOT cache it (cf-cache-status: DYNAMIC), so we serve
+    index.html dynamically and stamp the asset URLs with this token. A deploy
+    changes the files' mtime -> new ?v=... -> a URL Cloudflare has never
+    cached -> it fetches fresh. Zero dashboard, zero per-deploy steps.
+    """
+    latest = 0.0
+    for name in ("app.js", "style.css", "index.html"):
+        try:
+            latest = max(latest, (_FRONTEND_DIR / name).stat().st_mtime)
+        except OSError:
+            pass
+    return str(int(latest))
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+def index():
+    html = (_FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+    ver = _asset_version()
+    html = html.replace("app.js?v=2", f"app.js?v={ver}")
+    html = html.replace("style.css?v=2", f"style.css?v={ver}")
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+# Serve the rest of the static frontend (/app.js, /style.css). Mounted last so
+# the /api/* routes and the dynamic index above take precedence. Single-origin
+# means no CORS and no separate frontend host — one tunnel serves it all.
 app.mount(
     "/",
-    NoCacheStaticFiles(directory=str(_REPO_ROOT / "web" / "frontend"), html=True),
+    NoCacheStaticFiles(directory=str(_FRONTEND_DIR), html=True),
     name="frontend",
 )

@@ -158,6 +158,19 @@ def test_static_assets_sent_no_cache(client):
         assert "no-cache" in r.headers.get("cache-control", "").lower(), path
 
 
+def test_index_stamps_dynamic_asset_version(client):
+    # "/" is served dynamically (Cloudflare never caches HTML) and rewrites
+    # the asset URLs with an mtime token, so a deploy auto-busts the edge
+    # cache for app.js/style.css with no dashboard and no manual version bump.
+    import re
+    r = client.get("/")
+    assert r.status_code == 200
+    m = re.search(r"app\.js\?v=(\d+)", r.text)
+    assert m, "index.html must reference app.js with a numeric ?v= token"
+    assert m.group(1) != "2", "version must be the dynamic mtime, not the placeholder"
+    assert f"style.css?v={m.group(1)}" in r.text
+
+
 def test_api_routes_take_precedence_over_static_mount(client):
     # The "/" StaticFiles mount must not shadow /api/* routes.
     resp = client.get("/api/report/unknown-id")
