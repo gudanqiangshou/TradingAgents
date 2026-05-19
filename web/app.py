@@ -180,6 +180,8 @@ _REPORT_SECTION_ORDER = [
 _VALID_TICKER = re.compile(r"^[A-Za-z0-9.\-]{1,20}$")
 _VALID_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _VALID_ANALYSTS = {"market", "social", "news", "fundamentals"}
+
+
 def resolve_asset(ticker: str, analysts: list[str]) -> tuple[str, list[str]]:
     """Mirror the CLI's detect_asset_type/filter_analysts: crypto tickers run
     as 'crypto' and drop fundamentals (no company financials for a coin)."""
