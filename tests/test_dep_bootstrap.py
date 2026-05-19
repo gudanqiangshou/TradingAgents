@@ -13,6 +13,7 @@ so tests are fully independent.
 """
 
 import importlib as _real_importlib
+import subprocess as _real_subprocess
 import sys
 import threading
 import time
@@ -122,7 +123,7 @@ def test_installs_then_imports_on_missing():
 
     mock_subprocess = MagicMock()
     mock_subprocess.run.side_effect = run_side_effect
-    mock_subprocess.TimeoutExpired = __import__("subprocess").TimeoutExpired
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
 
     with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
          patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
@@ -131,6 +132,7 @@ def test_installs_then_imports_on_missing():
 
     assert result is fake_pkg
     mock_subprocess.run.assert_called_once()
+    mock_importlib.invalidate_caches.assert_called_once()
 
     argv = mock_subprocess.run.call_args[0][0]
     assert argv[0] == sys.executable
@@ -170,7 +172,7 @@ def test_custom_pip_specs_used():
 
     mock_subprocess = MagicMock()
     mock_subprocess.run.side_effect = run_side_effect
-    mock_subprocess.TimeoutExpired = __import__("subprocess").TimeoutExpired
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
 
     custom_specs = ["foo==1.2"]
 
@@ -206,7 +208,7 @@ def test_pip_failure_raises_DependencyUnavailable_not_crash():
 
     mock_subprocess = MagicMock()
     mock_subprocess.run.return_value = mock_proc
-    mock_subprocess.TimeoutExpired = __import__("subprocess").TimeoutExpired
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
 
     with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
          patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
@@ -221,8 +223,6 @@ def test_timeout_raises_DependencyUnavailable():
     When subprocess.run raises subprocess.TimeoutExpired, ensure() must catch
     it and raise DependencyUnavailable (not let TimeoutExpired propagate).
     """
-    import subprocess as _real_subprocess
-
     mod = _import_bootstrap()
 
     mock_importlib = MagicMock(wraps=_real_importlib)
@@ -259,7 +259,7 @@ def test_single_flight_no_repeat_pip_after_failure():
 
     mock_subprocess = MagicMock()
     mock_subprocess.run.return_value = mock_proc
-    mock_subprocess.TimeoutExpired = __import__("subprocess").TimeoutExpired
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
 
     with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
          patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
@@ -287,8 +287,6 @@ def test_thread_safe_single_install():
     When multiple threads call ensure() concurrently for the same missing
     package, subprocess.run must be called AT MOST ONCE (double-checked locking).
     """
-    import subprocess as _real_subprocess
-
     mod = _import_bootstrap()
 
     n_threads = 5
@@ -352,3 +350,48 @@ def test_thread_safe_single_install():
     )
     for r in results:
         assert r is fake_pkg
+
+
+@pytest.mark.unit
+def test_pip_succeeds_but_import_still_fails():
+    """
+    pip returns returncode==0 (broken/namespace wheel) but importlib.import_module
+    STILL raises ImportError after install.  ensure() must:
+    - raise DependencyUnavailable (not raw ImportError)
+    - call subprocess.run exactly once
+    - record the name in single-flight so a second call does NOT re-run pip
+    """
+    mod = _import_bootstrap()
+
+    mock_importlib = MagicMock(wraps=_real_importlib)
+    # import_module always raises ImportError — even after pip "succeeds"
+    mock_importlib.import_module.side_effect = ImportError("No module named 'brokenpkg'")
+    mock_importlib.invalidate_caches = MagicMock()
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.stderr = ""
+
+    mock_subprocess = MagicMock()
+    mock_subprocess.run.return_value = mock_proc
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
+
+    with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
+
+        # First call: pip runs (returncode 0) but import still fails
+        with pytest.raises(mod.DependencyUnavailable):
+            mod.ensure("brokenpkg")
+
+        assert mock_subprocess.run.call_count == 1, (
+            "subprocess.run should have been called exactly once on first attempt"
+        )
+
+        # Second call: single-flight must block re-running pip
+        with pytest.raises(mod.DependencyUnavailable):
+            mod.ensure("brokenpkg")
+
+        assert mock_subprocess.run.call_count == 1, (
+            "subprocess.run must NOT be called again after post-install ImportError "
+            "(single-flight set should have recorded the failure)"
+        )

@@ -13,7 +13,7 @@ package.
 Fail-safe: all subprocess/import errors are translated to DependencyUnavailable;
 no other exception type escapes this module.
 
-Stdlib-only: importlib, subprocess, sys, threading, time, logging.
+Stdlib-only: importlib, subprocess, sys, threading, time, logging, types.
 """
 
 import importlib
@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 __all__ = ["DependencyUnavailable", "CHINA_DATA_PINS", "ensure"]
 
@@ -64,7 +65,7 @@ def ensure(
     pip_specs: list[str] | None = None,
     *,
     timeout: int = 600,
-) -> object:
+) -> types.ModuleType:
     """
     Ensure *import_name* is importable, installing it via pip if necessary.
 
@@ -122,13 +123,13 @@ def ensure(
                 capture_output=True,
                 text=True,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             elapsed = time.monotonic() - t0
             logger.error(
                 "pip install timed out after %.1fs for %s", elapsed, import_name
             )
             _failed_installs.add(import_name)
-            raise DependencyUnavailable(f"{import_name}: pip install timed out")
+            raise DependencyUnavailable(f"{import_name}: pip install timed out") from e
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -147,14 +148,14 @@ def ensure(
                 stderr_tail,
             )
             _failed_installs.add(import_name)
-            raise DependencyUnavailable(f"{import_name}: pip install failed")
+            raise DependencyUnavailable(f"{import_name}: pip install failed") from None
 
         # Invalidate import caches so the newly-installed package is visible.
         importlib.invalidate_caches()
 
         try:
             module = importlib.import_module(import_name)
-        except ImportError:
+        except ImportError as e:
             logger.error(
                 "pip install succeeded but '%s' still cannot be imported",
                 import_name,
@@ -162,6 +163,6 @@ def ensure(
             _failed_installs.add(import_name)
             raise DependencyUnavailable(
                 f"{import_name}: installed but still not importable"
-            )
+            ) from e
 
         return module
