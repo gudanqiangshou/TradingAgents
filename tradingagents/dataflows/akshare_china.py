@@ -130,3 +130,15 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     )
 
     return header + df.to_csv()
+
+
+def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
+    """If ticker is an A-share/HK symbol, route the implemented data
+    categories to the 'akshare' vendor for THIS run only. Replaces the
+    data_vendors sub-dict (never mutates the shared one in place)."""
+    if resolve_market(ticker) not in (Market.A_SHARE, Market.HK):
+        return
+    vendors = dict(config.get("data_vendors") or {})
+    vendors["core_stock_apis"] = "akshare"   # only category implemented so far;
+    # fundamental_data / news_data will be added in later phases
+    config["data_vendors"] = vendors

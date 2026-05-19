@@ -22,9 +22,6 @@ ANALYST_ORDER = [
     ("Fundamentals Analyst", AnalystType.FUNDAMENTALS),
 ]
 
-CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
-
-
 def get_ticker() -> str:
     """Prompt the user to enter a ticker symbol."""
     ticker = questionary.text(

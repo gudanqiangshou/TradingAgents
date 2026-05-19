@@ -21,6 +21,7 @@ from rich import box
 from rich.align import Align
 from rich.rule import Rule
 
+from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
@@ -1009,6 +1010,7 @@ def run_analysis(checkpoint: bool = False):
 
     # Create config with selected research depth
     config = build_analysis_config(selections, checkpoint)
+    apply_china_vendor_overlay(config, selections["ticker"])
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()

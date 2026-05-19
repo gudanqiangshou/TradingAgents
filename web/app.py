@@ -22,6 +22,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from starlette.responses import Response
+from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
 from tradingagents.market_resolver import Market, resolve_market
 
 
@@ -364,6 +365,7 @@ def _run_analysis_thread(
         # Crypto tickers run as 'crypto' and drop fundamentals — matching the
         # CLI, so e.g. BTC-USD isn't analysed with stock-only logic.
         asset_type, analysts = resolve_asset(ticker, analysts)
+        apply_china_vendor_overlay(config, ticker)
 
         graph = TradingAgentsGraph(
             selected_analysts=analysts,
