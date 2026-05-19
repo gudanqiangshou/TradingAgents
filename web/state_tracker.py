@@ -112,15 +112,21 @@ def process_chunk(tracker: AgentTracker, chunk: dict[str, Any]) -> list[dict]:
             for agent in ["Bull Researcher", "Bear Researcher", "Research Manager"]:
                 if tracker.agent_status.get(agent) == "pending":
                     _emit_status(tracker, agent, "in_progress", prev_status, events)
+        # Emit the section as ONE combined document (not per-speaker
+        # overwrites): the live UI replaces a section card on each event,
+        # so per-speaker emits would drop Bull/Bear and only show the last
+        # speaker. Combining keeps the live view as complete as the report.
+        parts = []
         if bull:
-            _emit_section(tracker, "investment_plan",
-                          f"### Bull Researcher Analysis\n{bull}", prev_sections, events)
+            parts.append(f"### Bull Researcher Analysis\n{bull}")
         if bear:
-            _emit_section(tracker, "investment_plan",
-                          f"### Bear Researcher Analysis\n{bear}", prev_sections, events)
+            parts.append(f"### Bear Researcher Analysis\n{bear}")
         if judge:
+            parts.append(f"### Research Manager Decision\n{judge}")
+        if parts:
             _emit_section(tracker, "investment_plan",
-                          f"### Research Manager Decision\n{judge}", prev_sections, events)
+                          "\n\n".join(parts), prev_sections, events)
+        if judge:
             for agent in ["Bull Researcher", "Bear Researcher", "Research Manager"]:
                 _emit_status(tracker, agent, "completed", prev_status, events)
             _emit_status(tracker, "Trader", "in_progress", prev_status, events)
@@ -142,19 +148,26 @@ def process_chunk(tracker: AgentTracker, chunk: dict[str, Any]) -> list[dict]:
 
         if agg:
             _emit_status(tracker, "Aggressive Analyst", "in_progress", prev_status, events)
-            _emit_section(tracker, "final_trade_decision",
-                          f"### Aggressive Analyst Analysis\n{agg}", prev_sections, events)
         if con:
             _emit_status(tracker, "Conservative Analyst", "in_progress", prev_status, events)
-            _emit_section(tracker, "final_trade_decision",
-                          f"### Conservative Analyst Analysis\n{con}", prev_sections, events)
         if neu:
             _emit_status(tracker, "Neutral Analyst", "in_progress", prev_status, events)
-            _emit_section(tracker, "final_trade_decision",
-                          f"### Neutral Analyst Analysis\n{neu}", prev_sections, events)
+        # Combined document (same reasoning as investment_plan): one section
+        # holding the full risk debate + PM decision, not per-speaker
+        # overwrites that the live UI would collapse to just the last one.
+        parts = []
+        if agg:
+            parts.append(f"### Aggressive Analyst Analysis\n{agg}")
+        if con:
+            parts.append(f"### Conservative Analyst Analysis\n{con}")
+        if neu:
+            parts.append(f"### Neutral Analyst Analysis\n{neu}")
         if judge:
+            parts.append(f"### Portfolio Manager Decision\n{judge}")
+        if parts:
             _emit_section(tracker, "final_trade_decision",
-                          f"### Portfolio Manager Decision\n{judge}", prev_sections, events)
+                          "\n\n".join(parts), prev_sections, events)
+        if judge:
             for agent in ["Aggressive Analyst", "Conservative Analyst",
                           "Neutral Analyst", "Portfolio Manager"]:
                 _emit_status(tracker, agent, "completed", prev_status, events)

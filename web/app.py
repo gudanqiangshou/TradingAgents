@@ -164,6 +164,18 @@ def _check_access(supplied: str | None) -> None:
         raise HTTPException(status_code=401, detail="访问口令缺失或错误")
 
 
+# Saved-report section order + titles (kept in sync with the frontend
+# SECTION_LABELS so the history report reads the same as the live UI).
+_REPORT_SECTION_ORDER = [
+    ("market_report", "市场分析报告"),
+    ("sentiment_report", "情绪分析报告"),
+    ("news_report", "新闻分析报告"),
+    ("fundamentals_report", "基本面分析报告"),
+    ("investment_plan", "研究团队决策"),
+    ("trader_investment_plan", "交易员计划"),
+    ("final_trade_decision", "投资组合经理决策"),
+]
+
 _VALID_TICKER = re.compile(r"^[A-Za-z0-9.\-]{1,20}$")
 _VALID_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _VALID_ANALYSTS = {"market", "social", "news", "fundamentals"}
@@ -344,7 +356,6 @@ def _run_analysis_thread(
     from tradingagents.graph.signal_processing import SignalProcessor
 
     stop_event = job_mgr.get_stop_event(job_id)
-    final_report_parts: list[str] = []
 
     try:
         config = DEFAULT_CONFIG.copy()
@@ -382,10 +393,6 @@ def _run_analysis_thread(
                 break
             for event in process_chunk(tracker, chunk):
                 _emit(job_id, event["type"], event["data"])
-                if event["type"] == "report_section":
-                    final_report_parts.append(
-                        f"## {event['data']['section']}\n{event['data']['content']}"
-                    )
 
         if stop_event.is_set():
             # Timed out / aborted: the watchdog already marked the job ERROR.
@@ -418,9 +425,19 @@ def _run_analysis_thread(
         raw_signal = SignalProcessor().process_signal(final_decision)
         action = SIGNAL_ACTION_MAP.get(raw_signal or "", "HOLD")
         _emit(job_id, "final_decision", {"raw": final_decision, "action": action})
-        final_report_parts.append(f"## 最终交易决策\n\n**{action}**")
 
-        full_report = "\n\n".join(final_report_parts)
+        # Build the saved report from the FINAL value of each section (one
+        # block per section, ordered) — NOT by appending every streamed
+        # event. This deduplicates the growing investment_plan /
+        # final_trade_decision sections so the saved/history report matches
+        # exactly what the live UI shows.
+        report_parts = []
+        for key, title in _REPORT_SECTION_ORDER:
+            content = tracker.report_sections.get(key)
+            if content:
+                report_parts.append(f"## {title}\n\n{content}")
+        report_parts.append(f"## 最终交易决策\n\n**{action}**")
+        full_report = "\n\n".join(report_parts)
         if len(full_report) > _MAX_REPORT_CHARS:
             full_report = (
                 full_report[:_MAX_REPORT_CHARS]

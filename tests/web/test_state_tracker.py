@@ -83,3 +83,37 @@ def test_trader_branch_marks_trader_completed_and_aggressive_in_progress():
     assert len(section_events) == 1
     assert status_map.get("Trader") == "completed"
     assert status_map.get("Aggressive Analyst") == "in_progress"
+
+
+def test_investment_plan_emitted_as_combined_document():
+    # Bull + Bear + RM must arrive in ONE section value (the live UI replaces
+    # a section card per event; per-speaker emits would drop Bull/Bear).
+    tracker = make_tracker(["market"])
+    events = process_chunk(tracker, {"investment_debate_state": {
+        "bull_history": "BULLCASE", "bear_history": "BEARCASE",
+        "judge_decision": "RMVERDICT",
+    }})
+    secs = [e for e in events if e["type"] == "report_section"
+            and e["data"]["section"] == "investment_plan"]
+    assert len(secs) == 1
+    c = secs[-1]["data"]["content"]
+    assert "BULLCASE" in c and "BEARCASE" in c and "RMVERDICT" in c
+    assert "### Bull Researcher Analysis" in c
+    assert "### Research Manager Decision" in c
+    # tracker holds the full combined doc, not just the last speaker
+    assert tracker.report_sections["investment_plan"] == c
+
+
+def test_final_trade_decision_combines_all_risk_voices():
+    tracker = make_tracker(["market"])
+    events = process_chunk(tracker, {"risk_debate_state": {
+        "aggressive_history": "AGG", "conservative_history": "CON",
+        "neutral_history": "NEU", "judge_decision": "**Rating**: Buy PMV",
+    }})
+    secs = [e for e in events if e["type"] == "report_section"
+            and e["data"]["section"] == "final_trade_decision"]
+    assert len(secs) == 1
+    c = secs[-1]["data"]["content"]
+    for piece in ("AGG", "CON", "NEU", "PMV"):
+        assert piece in c, piece
+    assert tracker.report_sections["final_trade_decision"] == c
