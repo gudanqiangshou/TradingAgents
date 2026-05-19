@@ -5,12 +5,14 @@ import warnings
 # which entry point started the process. find_dotenv(usecwd=True) walks
 # from the CWD, so the installed `tradingagents` console script picks up
 # the project's .env instead of stepping up from site-packages.
-# load_dotenv defaults to override=False, so it never clobbers values
-# the caller has already exported.
+# override=True so the project's .env is authoritative even when the
+# host process injects its own ANTHROPIC_* vars (e.g. Claude Code injects
+# ANTHROPIC_BASE_URL=https://api.anthropic.com and an empty
+# ANTHROPIC_API_KEY, which would otherwise shadow the .env values).
 try:
     from dotenv import find_dotenv, load_dotenv
 
-    load_dotenv(find_dotenv(usecwd=True))
+    load_dotenv(find_dotenv(usecwd=True), override=True)
     load_dotenv(find_dotenv(".env.enterprise", usecwd=True), override=False)
 except ImportError:
     pass

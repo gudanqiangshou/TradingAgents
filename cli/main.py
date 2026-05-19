@@ -1,5 +1,6 @@
 from typing import Optional
 import datetime
+import os
 import typer
 import questionary
 from pathlib import Path
@@ -974,17 +975,24 @@ def format_tool_args(args, max_length=80) -> str:
         return result[:max_length - 3] + "..."
     return result
 
-def run_analysis(checkpoint: bool = False):
-    # First get all user selections
-    selections = get_user_selections()
+def build_analysis_config(selections: dict, checkpoint: bool = False) -> dict:
+    """Resolve the runtime config from interactive selections.
 
-    # Create config with selected research depth
+    Extracted from run_analysis so the selection->config contract is
+    unit-testable without driving the interactive prompts.
+    """
     config = DEFAULT_CONFIG.copy()
     config["max_debate_rounds"] = selections["research_depth"]
     config["max_risk_discuss_rounds"] = selections["research_depth"]
     config["quick_think_llm"] = selections["shallow_thinker"]
     config["deep_think_llm"] = selections["deep_thinker"]
-    config["backend_url"] = selections["backend_url"]
+    # An explicit TRADINGAGENTS_LLM_BACKEND_URL is a deliberate override
+    # (e.g. a custom proxy/gateway) and must outrank the provider menu's
+    # hardcoded per-provider endpoint. DEFAULT_CONFIG.copy() already
+    # carries the env value, so only let the menu selection replace it
+    # when the env override is absent.
+    if not os.environ.get("TRADINGAGENTS_LLM_BACKEND_URL"):
+        config["backend_url"] = selections["backend_url"]
     config["llm_provider"] = selections["llm_provider"].lower()
     # Provider-specific thinking configuration
     config["google_thinking_level"] = selections.get("google_thinking_level")
@@ -992,6 +1000,15 @@ def run_analysis(checkpoint: bool = False):
     config["anthropic_effort"] = selections.get("anthropic_effort")
     config["output_language"] = selections.get("output_language", "English")
     config["checkpoint_enabled"] = checkpoint
+    return config
+
+
+def run_analysis(checkpoint: bool = False):
+    # First get all user selections
+    selections = get_user_selections()
+
+    # Create config with selected research depth
+    config = build_analysis_config(selections, checkpoint)
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
