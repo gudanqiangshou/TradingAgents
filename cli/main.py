@@ -1010,6 +1010,7 @@ def run_analysis(checkpoint: bool = False):
 
     # Create config with selected research depth
     config = build_analysis_config(selections, checkpoint)
+    # Applied here, not inside build_analysis_config: that fn has no ticker param (a regression test calls it without one).
     apply_china_vendor_overlay(config, selections["ticker"])
 
     # Create stats callback handler for tracking LLM/tool calls

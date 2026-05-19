@@ -31,18 +31,28 @@ def test_overlay_sets_akshare_for_a_share():
 
 
 # ---------------------------------------------------------------------------
-# 2. overlay sets akshare for HK tickers
+# 2. overlay is a noop for HK tickers (HK routing deferred to a later phase)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
-def test_overlay_sets_akshare_for_hk():
+def test_overlay_noop_for_hk_until_hk_impl():
+    """HK tickers must NOT be routed to akshare yet.
+
+    HK data fetching is not implemented; routing to akshare would cause
+    get_stock_data to return an error string that feeds the LLM as price data.
+    HK tickers keep using the default yfinance vendor until HK fetching is
+    implemented in a later phase.
+    """
     import tradingagents.default_config as dc
     from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
 
     cfg = copy.deepcopy(dc.DEFAULT_CONFIG)
     apply_china_vendor_overlay(cfg, "0700.HK")
 
-    assert cfg["data_vendors"]["core_stock_apis"] == "akshare"
+    # Overlay must be a noop — yfinance unchanged for HK
+    assert cfg["data_vendors"]["core_stock_apis"] == "yfinance", (
+        "HK tickers should NOT be routed to akshare until HK fetching is implemented"
+    )
     assert cfg["data_vendors"]["technical_indicators"] == "yfinance"
     assert cfg["data_vendors"]["fundamental_data"] == "yfinance"
     assert cfg["data_vendors"]["news_data"] == "yfinance"

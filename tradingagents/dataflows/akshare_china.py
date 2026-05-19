@@ -133,12 +133,22 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
 
 
 def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
-    """If ticker is an A-share/HK symbol, route the implemented data
-    categories to the 'akshare' vendor for THIS run only. Replaces the
-    data_vendors sub-dict (never mutates the shared one in place)."""
-    if resolve_market(ticker) not in (Market.A_SHARE, Market.HK):
+    """Route A-share tickers to the 'akshare' vendor for THIS run only.
+
+    HK tickers are intentionally NOT routed here yet; they keep using the
+    default yfinance vendor until HK data fetching is implemented in a
+    later phase.
+
+    The function REPLACES config["data_vendors"] with a fresh dict rather
+    than mutating it in place.  The call sites pass a SHALLOW
+    DEFAULT_CONFIG.copy(), so config["data_vendors"] is the SAME object as
+    the module-global DEFAULT_CONFIG["data_vendors"]; mutating it in place
+    would corrupt the global default across all subsequent runs.
+    """
+    if resolve_market(ticker) != Market.A_SHARE:
         return
     vendors = dict(config.get("data_vendors") or {})
-    vendors["core_stock_apis"] = "akshare"   # only category implemented so far;
-    # fundamental_data / news_data will be added in later phases
+    # Only core_stock_apis is implemented today; fundamental_data / news_data
+    # will be added to this overlay in later phases.
+    vendors["core_stock_apis"] = "akshare"
     config["data_vendors"] = vendors

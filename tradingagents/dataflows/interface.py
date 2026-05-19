@@ -61,6 +61,7 @@ TOOLS_CATEGORIES = {
     }
 }
 
+# Informational only; the authoritative per-method registry is VENDOR_METHODS.
 VENDOR_LIST = [
     "yfinance",
     "alpha_vantage",

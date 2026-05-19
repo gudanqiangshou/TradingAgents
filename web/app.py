@@ -365,6 +365,7 @@ def _run_analysis_thread(
         # Crypto tickers run as 'crypto' and drop fundamentals — matching the
         # CLI, so e.g. BTC-USD isn't analysed with stock-only logic.
         asset_type, analysts = resolve_asset(ticker, analysts)
+        # Applied here, not inside build_analysis_config: that fn has no ticker param (a regression test calls it without one).
         apply_china_vendor_overlay(config, ticker)
 
         graph = TradingAgentsGraph(
