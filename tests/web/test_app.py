@@ -170,6 +170,36 @@ def test_security_headers_present(client):
     assert r.headers.get("x-frame-options") == "DENY"
 
 
+def test_security_middleware_is_pure_asgi_not_basehttp(client):
+    # BaseHTTPMiddleware (@app.middleware("http")) buffers the response and
+    # breaks SSE ("ASGI callable returned without completing response").
+    # The header injector must be a plain ASGI class.
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from web import app as app_module
+    sec = [m for m in app_module.app.user_middleware
+           if m.cls is app_module.SecurityHeadersMiddleware]
+    assert sec, "SecurityHeadersMiddleware must be registered"
+    assert not issubclass(app_module.SecurityHeadersMiddleware, BaseHTTPMiddleware)
+
+
+def test_sse_stream_carries_security_headers_and_still_streams(client):
+    # Regression for the middleware/SSE break: headers must be injected on
+    # the streamed response AND the body must still stream to completion.
+    from web import app as app_module
+    with patch("web.app._run_analysis_thread"):
+        jid = client.post("/api/analyze", json={
+            "ticker": "TSLA", "date": "2026-05-18",
+            "analysts": ["market"], "language": "Chinese",
+        }).json()["job_id"]
+    buf = app_module._buffers[jid]
+    buf.add("agent_status", {"agent": "Market Analyst", "status": "completed"})
+    buf.add("done", {"job_id": jid})
+    with client.stream("GET", f"/api/stream/{jid}") as r:
+        assert "default-src 'self'" in r.headers.get("content-security-policy", "")
+        body = "".join(r.iter_text())
+    assert "event: agent_status" in body and "event: done" in body
+
+
 def test_index_has_no_inline_handlers(client):
     # CSP script-src 'self' only protects us if the HTML has no inline JS.
     html = client.get("/").text

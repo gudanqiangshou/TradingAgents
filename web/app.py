@@ -85,26 +85,55 @@ _CSP = (
 )
 
 
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    resp = await call_next(request)
-    resp.headers["Content-Security-Policy"] = _CSP
-    resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["X-Frame-Options"] = "DENY"
-    resp.headers["Referrer-Policy"] = "no-referrer"
-    # Observability for password probing: log every rejected gated request
-    # (never the password itself — it's in a header we don't read here).
-    # Behind Cloudflare the socket peer is localhost, so prefer CF's real-IP
-    # header. Owner can `grep "auth-fail" web-stderr.log`.
-    if resp.status_code == 401 and request.url.path.startswith("/api/"):
-        ip = (request.headers.get("cf-connecting-ip")
-              or request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-              or (request.client.host if request.client else "?"))
-        _log.warning(
-            "auth-fail path=%s ip=%s ua=%r",
-            request.url.path, ip, request.headers.get("user-agent", "")[:120],
-        )
-    return resp
+class SecurityHeadersMiddleware:
+    """Pure-ASGI header injection.
+
+    NOT a BaseHTTPMiddleware (@app.middleware("http")): that wraps the
+    response body and breaks long-lived SSE streams ("ASGI callable
+    returned without completing response", premature stream cut). This
+    injects headers on the http.response.start message and never touches
+    the body, so SSE streaming is unaffected.
+    """
+
+    _EXTRA = [
+        (b"content-security-policy", _CSP.encode()),
+        (b"x-content-type-options", b"nosniff"),
+        (b"x-frame-options", b"DENY"),
+        (b"referrer-policy", b"no-referrer"),
+    ]
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", [])
+                message["headers"].extend(self._EXTRA)
+                # Log rejected gated requests (never the password — it's a
+                # header we never read here). Owner: grep auth-fail in
+                # web-stderr.log.
+                if message["status"] == 401 and scope.get("path", "").startswith("/api/"):
+                    hdr = {k.decode().lower(): v.decode("latin-1")
+                           for k, v in scope.get("headers", [])}
+                    ip = (hdr.get("cf-connecting-ip")
+                          or hdr.get("x-forwarded-for", "").split(",")[0].strip()
+                          or "?")
+                    _log.warning(
+                        "auth-fail path=%s ip=%s ua=%r",
+                        scope.get("path", ""), ip,
+                        hdr.get("user-agent", "")[:120],
+                    )
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Optional access gate. When TRADINGAGENTS_WEB_PASSWORD is set, POST /api/analyze
 # (the only endpoint that spends LLM budget) requires a matching X-Access-Password
@@ -357,14 +386,33 @@ def _run_analysis_thread(
             _emit(job_id, "error", {"message": "分析超时或被中止，请重试"})
             return
 
-        # Final decision
+        # The graph ran to END but, with no final trade decision, the
+        # Trader/Risk/Portfolio nodes produced nothing — the upstream model
+        # very likely returned empty for the oversized Trader prompt (the
+        # whole multi-round debate is embedded; more analysts -> longer ->
+        # empty). The framework swallows that (no exception), so DON'T
+        # report success or save a misleading "—" history entry — tell the
+        # user honestly and log what was/wasn't produced for diagnosis.
         final_decision = tracker.report_sections.get("final_trade_decision") or ""
-        action = "—"
-        if final_decision:
-            raw_signal = SignalProcessor().process_signal(final_decision)
-            action = SIGNAL_ACTION_MAP.get(raw_signal or "", "HOLD")
-            _emit(job_id, "final_decision", {"raw": final_decision, "action": action})
-            final_report_parts.append(f"## 最终交易决策\n\n**{action}**")
+        if not final_decision:
+            produced = sorted(s for s, v in tracker.report_sections.items() if v)
+            _log.warning(
+                "incomplete-run job=%s ticker=%s analysts=%s produced=%s "
+                "(no final_trade_decision; upstream likely returned empty)",
+                job_id, ticker, analysts, produced,
+            )
+            job_mgr.error_job(job_id, "未产出交易决策")
+            _emit(job_id, "error", {"message": (
+                "分析未产出最终交易决策。常见原因：选的分析师过多，导致交易员"
+                "环节输入过长、上游模型返回空。请减少分析师数量（如只选市场+新闻）"
+                "后重试。"
+            )})
+            return
+
+        raw_signal = SignalProcessor().process_signal(final_decision)
+        action = SIGNAL_ACTION_MAP.get(raw_signal or "", "HOLD")
+        _emit(job_id, "final_decision", {"raw": final_decision, "action": action})
+        final_report_parts.append(f"## 最终交易决策\n\n**{action}**")
 
         full_report = "\n\n".join(final_report_parts)
         if len(full_report) > _MAX_REPORT_CHARS:
