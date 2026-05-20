@@ -423,6 +423,48 @@ class TestFailSafe:
         assert "a-share" in lower or "a_share" in lower or "a share" in lower
 
     @pytest.mark.unit
+    def test_nan_cells_treated_as_empty_no_literal_nan_in_output(self):
+        """NaN in summary/content/link columns must NOT produce 'nan' in output."""
+        df = pd.DataFrame({
+            "新闻标题": ["NaN-cell article"],
+            "新闻内容": [float("nan")],
+            "新闻摘要": [float("nan")],
+            "新闻链接": [float("nan")],
+            "文章来源": ["SRC"],
+            "发布时间": ["2024-01-15 10:00:00"],
+        })
+        ak = _fake_ak(df)
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_news("600519", START, END)
+        # Article should appear (title and source line present)
+        assert "### NaN-cell article (source: SRC)" in result
+        # No literal "nan" strings from NaN cells
+        assert ": nan" not in result
+        assert "Link: nan" not in result
+        assert "\nnan\n" not in result
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("pub_time", [
+        "2024-01-15 10:00:00",
+        "2024-01-15 10:00:00+08:00",
+    ])
+    def test_date_filter_handles_naive_and_tz_aware_timestamps(self, pub_time):
+        """Both naive and tz-aware 発布時間 values are accepted by the date filter."""
+        df = pd.DataFrame({
+            "新闻标题": ["tz-test article"],
+            "新闻内容": ["content"],
+            "新闻摘要": ["summary"],
+            "新闻链接": [""],
+            "文章来源": ["SRC"],
+            "发布时间": [pub_time],
+        })
+        ak = _fake_ak(df)
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_news("600519", START, END)
+        # Article must appear in the output (within 2024-01-01 – 2024-01-31 range)
+        assert "tz-test article" in result
+
+    @pytest.mark.unit
     def test_never_raises_under_any_input(self):
         """get_news never raises regardless of inputs (exhaustive smoke test)."""
         scenarios = [

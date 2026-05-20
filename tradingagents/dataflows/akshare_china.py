@@ -445,6 +445,11 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
                 return fallback
             return None
 
+        def _safe_str(value) -> str:
+            if value is None or pd.isna(value):
+                return ""
+            return str(value).strip()
+
         title_col   = _col("新闻标题", "标题")
         content_col = _col("新闻内容", "内容")
         summary_col = _col("新闻摘要", "摘要")
@@ -486,12 +491,12 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
             # Summary: prefer explicit summary column; fall back to truncated content
             summary = ""
             if summary_col is not None:
-                summary = str(row.get(summary_col, "") or "").strip()
+                summary = _safe_str(row.get(summary_col, ""))
             if not summary and content_col is not None:
-                content = str(row.get(content_col, "") or "").strip()
+                content = _safe_str(row.get(content_col, ""))
                 summary = content[:200] if content else ""
 
-            link = str(row.get(link_col, "") or "").strip() if link_col else ""
+            link = _safe_str(row.get(link_col, "")) if link_col else ""
 
             news_str += f"### {title} (source: {publisher})\n"
             if summary:
