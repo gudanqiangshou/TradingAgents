@@ -1,5 +1,5 @@
 """
-Tests for Phase 2c: AkShare vendor registration, A-share/HK routing overlay,
+Tests for Phase 2c + Phase 5: AkShare vendor registration, A-share/HK routing overlay,
 and aliasing safety.
 
 All tests are offline; akshare is never actually imported.
@@ -29,34 +29,43 @@ def test_overlay_sets_akshare_for_a_share():
     assert cfg["data_vendors"]["news_data"] == "akshare"
     # Other categories untouched
     assert cfg["data_vendors"]["technical_indicators"] == "yfinance"
+    # A_SHARE must NOT pollute tool_vendors (no per-method HK overrides for A_SHARE)
+    assert cfg.get("tool_vendors", {}) == {}, (
+        "A_SHARE overlay must not set tool_vendors"
+    )
 
 
 # ---------------------------------------------------------------------------
-# 2. overlay is a noop for HK tickers (HK routing deferred to a later phase)
+# 2. overlay sets per-method tool_vendors for HK tickers (Phase 5)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
-def test_overlay_noop_for_hk_until_hk_impl():
-    """HK tickers must NOT be routed to akshare yet.
-
-    HK data fetching is not implemented; routing to akshare would cause
-    get_stock_data to return an error string that feeds the LLM as price data.
-    HK tickers keep using the default yfinance vendor until HK fetching is
-    implemented in a later phase.
-    """
+def test_overlay_sets_per_method_for_hk():
+    """HK tickers get per-method tool_vendors overrides for the 2 supported methods."""
     import tradingagents.default_config as dc
     from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
 
     cfg = copy.deepcopy(dc.DEFAULT_CONFIG)
     apply_china_vendor_overlay(cfg, "0700.HK")
 
-    # Overlay must be a noop — yfinance unchanged for HK
+    # tool_vendors must have exactly the two HK-supported methods
+    assert cfg["tool_vendors"]["get_stock_data"] == "akshare"
+    assert cfg["tool_vendors"]["get_fundamentals"] == "akshare"
+
+    # The other 4 methods must NOT appear in tool_vendors (they fall back to yfinance)
+    for unsupported in ("get_balance_sheet", "get_cashflow", "get_income_statement", "get_news"):
+        assert unsupported not in cfg["tool_vendors"], (
+            f"HK overlay must not set tool_vendors[{unsupported!r}]; "
+            "that method should fall back to yfinance"
+        )
+
+    # HK must NOT touch data_vendors (other categories remain yfinance defaults)
     assert cfg["data_vendors"]["core_stock_apis"] == "yfinance", (
-        "HK tickers should NOT be routed to akshare until HK fetching is implemented"
+        "HK overlay must not touch data_vendors; other categories stay at yfinance"
     )
-    assert cfg["data_vendors"]["technical_indicators"] == "yfinance"
     assert cfg["data_vendors"]["fundamental_data"] == "yfinance"
     assert cfg["data_vendors"]["news_data"] == "yfinance"
+    assert cfg["data_vendors"]["technical_indicators"] == "yfinance"
 
 
 # ---------------------------------------------------------------------------
@@ -83,10 +92,14 @@ def test_overlay_noop_for_us_and_crypto():
 
 @pytest.mark.unit
 def test_overlay_does_not_mutate_global_default_config():
-    """Shallow copy (like the real call sites) must not corrupt DEFAULT_CONFIG."""
+    """Shallow copy (like the real call sites) must not corrupt DEFAULT_CONFIG.
+
+    Covers BOTH A_SHARE (data_vendors aliasing) AND HK (tool_vendors aliasing).
+    """
     import tradingagents.default_config as dc
     from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
 
+    # --- A_SHARE: data_vendors aliasing ---
     # SHALLOW copy — the shared data_vendors dict is the same object as in
     # DEFAULT_CONFIG, just like cli/main.py and web/app.py do.
     cfg = dc.DEFAULT_CONFIG.copy()
@@ -106,6 +119,29 @@ def test_overlay_does_not_mutate_global_default_config():
     )
     assert dc.DEFAULT_CONFIG["data_vendors"]["news_data"] == "yfinance", (
         "apply_china_vendor_overlay mutated DEFAULT_CONFIG news_data — aliasing bug!"
+    )
+
+    # --- HK: tool_vendors aliasing ---
+    # Verify DEFAULT_CONFIG["tool_vendors"] stays as empty dict after HK overlay
+    # on a fresh shallow copy.
+    original_tool_vendors = dict(dc.DEFAULT_CONFIG.get("tool_vendors", {}))
+    cfg_hk = dc.DEFAULT_CONFIG.copy()
+    apply_china_vendor_overlay(cfg_hk, "0700.HK")
+
+    # cfg_hk should have the two HK method overrides
+    assert cfg_hk["tool_vendors"]["get_stock_data"] == "akshare"
+    assert cfg_hk["tool_vendors"]["get_fundamentals"] == "akshare"
+
+    # DEFAULT_CONFIG["tool_vendors"] must be byte-identical to what it was before
+    assert dict(dc.DEFAULT_CONFIG.get("tool_vendors", {})) == original_tool_vendors, (
+        "apply_china_vendor_overlay mutated DEFAULT_CONFIG['tool_vendors'] — aliasing bug!"
+    )
+    # Specifically, the two HK keys must NOT have leaked into DEFAULT_CONFIG
+    assert "get_stock_data" not in dc.DEFAULT_CONFIG.get("tool_vendors", {}), (
+        "HK overlay leaked get_stock_data into DEFAULT_CONFIG['tool_vendors']"
+    )
+    assert "get_fundamentals" not in dc.DEFAULT_CONFIG.get("tool_vendors", {}), (
+        "HK overlay leaked get_fundamentals into DEFAULT_CONFIG['tool_vendors']"
     )
 
 

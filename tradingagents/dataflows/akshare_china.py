@@ -10,13 +10,15 @@ from tradingagents.market_resolver import resolve_market, Market
 
 
 def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
-    """Return OHLCV data for an A-share symbol as a formatted CSV string.
+    """Return OHLCV data for an A-share or HK symbol as a formatted CSV string.
 
     Parameters
     ----------
     symbol:
         A-share ticker — bare 6-digit code or with exchange suffix
         (.SH, .SS, .SZ, .BJ), e.g. ``"600519"`` or ``"600519.SH"``.
+        HK ticker — 1-5 digit code with ``.HK`` suffix, e.g. ``"0700.HK"``
+        or ``"00700.HK"`` or ``"9988.HK"``.
     start_date:
         Start of the date range in ``yyyy-mm-dd`` format.
     end_date:
@@ -32,19 +34,30 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
         On error or empty result: a plain-text message (never raises).
     """
     # ------------------------------------------------------------------
-    # Guard: this vendor only handles A-share symbols
+    # Guard: this vendor only handles A-share and HK symbols
     # ------------------------------------------------------------------
-    if resolve_market(symbol) != Market.A_SHARE:
+    market = resolve_market(symbol)
+    if market not in (Market.A_SHARE, Market.HK):
         return (
-            f"This vendor handles A-share data only. "
-            f"'{symbol}' was classified as non-A-share. "
+            f"This vendor handles A-share and HK data only. "
+            f"'{symbol}' was classified as non-A-share/non-HK. "
             "Please use the appropriate vendor for this symbol."
         )
 
+    kind = "A-share" if market == Market.A_SHARE else "HK"
+
     # ------------------------------------------------------------------
-    # Normalise symbol: strip whitespace, upper-case, drop exchange suffix
+    # Normalise symbol
     # ------------------------------------------------------------------
-    code = symbol.strip().upper().split(".")[0]
+    if market == Market.A_SHARE:
+        # Strip whitespace, upper-case, drop exchange suffix
+        code = symbol.strip().upper().split(".")[0]
+    else:
+        # HK: strip whitespace, upper-case, drop .HK suffix, left-pad to 5 digits
+        raw = symbol.strip().upper()
+        if raw.endswith(".HK"):
+            raw = raw[:-3]
+        code = raw.zfill(5)
 
     # Validate and convert dates yyyy-mm-dd → YYYYMMDD
     # Guard: malformed dates must return an error string, never raise
@@ -65,21 +78,25 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     try:
         ak = _dep_bootstrap.ensure("akshare")
     except _dep_bootstrap.DependencyUnavailable as exc:
-        return f"Error: A-share data source unavailable ({exc})"
+        return f"Error: {kind} data source unavailable ({exc})"
 
     # ------------------------------------------------------------------
     # Fetch data — catch arbitrary scraping errors
     # ------------------------------------------------------------------
     try:
-        df = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            start_date=ak_start,
-            end_date=ak_end,
-            adjust="qfq",
-        )
+        if market == Market.A_SHARE:
+            df = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=ak_start,
+                end_date=ak_end,
+                adjust="qfq",
+            )
+        else:
+            # HK: no start/end date params — returns all history; filter client-side
+            df = ak.stock_hk_daily(symbol=code, adjust="qfq")
     except Exception as exc:
-        return f"Error: failed to fetch A-share data for {symbol}: {exc}"
+        return f"Error: failed to fetch {kind} data for {symbol}: {exc}"
 
     # ------------------------------------------------------------------
     # Empty result
@@ -93,16 +110,31 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     # Shape the DataFrame — guard against unexpected akshare column schema
     # ------------------------------------------------------------------
     try:
-        col_map = {
-            "日期": "Date",
-            "开盘": "Open",
-            "收盘": "Close",
-            "最高": "High",
-            "最低": "Low",
-            "成交量": "Volume",
-        }
-        df = df.rename(columns=col_map)
-        df = df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
+        if market == Market.A_SHARE:
+            col_map = {
+                "日期": "Date",
+                "开盘": "Open",
+                "收盘": "Close",
+                "最高": "High",
+                "最低": "Low",
+                "成交量": "Volume",
+            }
+            df = df.rename(columns=col_map)
+            df = df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
+        else:
+            # HK: English columns date, open, high, low, close, volume
+            df = df.rename(columns={
+                "date": "Date",
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "volume": "Volume",
+            })
+            df = df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
+            # Client-side date filter (HK endpoint returns all history)
+            df["Date"] = df["Date"].astype(str)
+            df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
 
         # Coerce numerics
         for col in ["Open", "High", "Low", "Close", "Volume"]:
@@ -117,14 +149,24 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
         for col in ["Open", "High", "Low", "Close"]:
             df[col] = df[col].round(2)
     except Exception as exc:
-        return f"Error: unexpected A-share data schema for {symbol}: {exc}"
+        return f"Error: unexpected {kind} data response for {symbol}: {exc}"
+
+    # ------------------------------------------------------------------
+    # After shaping, check again for empty (HK client-side filter may empty it)
+    # ------------------------------------------------------------------
+    if df.empty:
+        return (
+            f"No data found for symbol '{symbol}' between {start_date} and {end_date}"
+        )
 
     # ------------------------------------------------------------------
     # Build output string  (same contract as yfinance vendor)
     # ------------------------------------------------------------------
+    # Use original ticker upper-cased as the display symbol in the header
+    display_symbol = symbol.strip().upper() if market == Market.HK else code
     retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = (
-        f"# Stock data for {code} from {start_date} to {end_date}\n"
+        f"# Stock data for {display_symbol} from {start_date} to {end_date}\n"
         f"# Total records: {len(df)}\n"
         f"# Data retrieved on: {retrieved_at}\n"
         "\n"
@@ -134,12 +176,13 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
 
 
 def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
-    """Return A-share company fundamentals as a formatted label/value string.
+    """Return A-share or HK company fundamentals as a formatted label/value string.
 
     Parameters
     ----------
     ticker:
         A-share ticker — bare 6-digit code or with exchange suffix.
+        HK ticker — 1-5 digit code with ``.HK`` suffix.
     curr_date:
         Accepted but not currently used; included to match the yfinance
         vendor's signature.
@@ -151,50 +194,74 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
         ``"Label: value"`` lines, one per indicator (latest period value).
         On empty/error: a plain-text message (never raises).
     """
-    if resolve_market(ticker) != Market.A_SHARE:
+    market = resolve_market(ticker)
+    if market not in (Market.A_SHARE, Market.HK):
         return (
-            f"This vendor handles A-share data only. "
-            f"'{ticker}' was classified as non-A-share. "
+            f"This vendor handles A-share and HK data only. "
+            f"'{ticker}' was classified as non-A-share/non-HK. "
             "Please use the appropriate vendor for this symbol."
         )
 
-    code = ticker.strip().upper().split(".")[0]
+    kind = "A-share" if market == Market.A_SHARE else "HK"
+
+    if market == Market.A_SHARE:
+        code = ticker.strip().upper().split(".")[0]
+    else:
+        # HK: strip .HK suffix, left-pad to 5 digits
+        raw = ticker.strip().upper()
+        if raw.endswith(".HK"):
+            raw = raw[:-3]
+        code = raw.zfill(5)
 
     try:
         ak = _dep_bootstrap.ensure("akshare")
     except _dep_bootstrap.DependencyUnavailable as exc:
-        return f"Error: A-share data source unavailable ({exc})"
+        return f"Error: {kind} data source unavailable ({exc})"
 
     try:
-        df = ak.stock_financial_abstract(symbol=code)
+        if market == Market.A_SHARE:
+            df = ak.stock_financial_abstract(symbol=code)
+        else:
+            df = ak.stock_financial_hk_analysis_indicator_em(symbol=code)
     except Exception as exc:
-        return f"Error: failed to fetch A-share fundamentals for {ticker}: {exc}"
+        return f"Error: failed to fetch {kind} fundamentals for {ticker}: {exc}"
 
     if df is None or df.empty:
         return f"No fundamentals data found for symbol '{ticker}'"
 
     try:
-        # The DataFrame is long-form: first column = item name, remaining = period values.
-        # Emit label: latest-period-value pairs.
-        item_col = df.columns[0]
-        # Use the second column (most recent period) as the value column
-        value_col = df.columns[1]
-        lines = []
-        for _, row in df.iterrows():
-            value = row[value_col]
-            if pd.isna(value) or (isinstance(value, str) and not value.strip()):
-                continue
-            lines.append(f"{row[item_col]}: {value}")
-
         retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         header = (
             f"# Company Fundamentals for {ticker.strip().upper()}\n"
             f"# Data retrieved on: {retrieved_at}\n"
             "\n"
         )
+
+        if market == Market.A_SHARE:
+            # The DataFrame is long-form: first column = item name, remaining = period values.
+            # Emit label: latest-period-value pairs.
+            item_col = df.columns[0]
+            # Use the second column (most recent period) as the value column
+            value_col = df.columns[1]
+            lines = []
+            for _, row in df.iterrows():
+                value = row[value_col]
+                if pd.isna(value) or (isinstance(value, str) and not value.strip()):
+                    continue
+                lines.append(f"{row[item_col]}: {value}")
+        else:
+            # HK: wide-form DataFrame; take latest period (iloc[0]) and emit each column
+            row = df.iloc[0]
+            lines = []
+            for col_name in df.columns:
+                value = row[col_name]
+                if pd.isna(value) or (isinstance(value, str) and not value.strip()):
+                    continue
+                lines.append(f"{col_name}: {value}")
+
         return header + "\n".join(lines)
     except Exception as exc:
-        return f"Error: unexpected A-share fundamentals response for {ticker}: {exc}"
+        return f"Error: unexpected {kind} fundamentals response for {ticker}: {exc}"
 
 
 def _filter_by_curr_date(df: "pd.DataFrame", curr_date: str | None) -> "pd.DataFrame":
@@ -516,28 +583,54 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
 
 
 def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
-    """Route A-share tickers to the 'akshare' vendor for THIS run only.
+    """Route A-share or HK tickers to the 'akshare' vendor for THIS run only.
 
-    Phase 4 overlay sets all three data categories for A_SHARE:
+    Design: A_SHARE vs HK use fundamentally different overlay strategies
+    because AkShare covers different methods for each market.
+
+    **A_SHARE** (category-wide overlay):
+    Replaces ``config["data_vendors"]`` with a fresh dict and sets all three
+    data categories:
     - ``core_stock_apis``   → ``"akshare"``  (OHLCV price data)
     - ``fundamental_data``  → ``"akshare"``  (balance_sheet / cashflow /
                                                income_statement / fundamentals)
     - ``news_data``         → ``"akshare"``  (per-stock news via stock_news_em)
 
-    HK tickers are intentionally NOT routed here; they keep using the default
-    yfinance vendor until HK data fetching is implemented in a later phase.
+    **HK** (per-method tool_vendors overlay):
+    AkShare only covers HK OHLCV (``stock_hk_daily``) and HK key indicators
+    (``stock_financial_hk_analysis_indicator_em``).  Statements and news are
+    NOT available from AkShare for HK, so those fall back to yfinance.
+    Sets per-method overrides in ``config["tool_vendors"]``:
+    - ``get_stock_data``   → ``"akshare"``
+    - ``get_fundamentals`` → ``"akshare"``
+    Does NOT touch ``data_vendors`` (yfinance remains the category default for
+    all other HK methods).
 
-    The function REPLACES config["data_vendors"] with a fresh dict rather
-    than mutating it in place.  The call sites pass a SHALLOW
-    DEFAULT_CONFIG.copy(), so config["data_vendors"] is the SAME object as
-    the module-global DEFAULT_CONFIG["data_vendors"]; mutating it in place
-    would corrupt the global default across all subsequent runs.
+    **US / CRYPTO**: no-op; config unchanged.
+
+    Aliasing safety:
+    Both paths create a fresh dict (``dict(...)`` copy) rather than mutating the
+    existing nested dict in place.  Call sites may pass a SHALLOW
+    ``DEFAULT_CONFIG.copy()``, so ``config["data_vendors"]`` and
+    ``config["tool_vendors"]`` could be the SAME objects as in the module-global
+    ``DEFAULT_CONFIG``; mutating them in place would corrupt that global.
     """
-    if resolve_market(ticker) != Market.A_SHARE:
-        return
-    vendors = dict(config.get("data_vendors") or {})
-    # All three categories overlaid for A-share:
-    vendors["core_stock_apis"] = "akshare"
-    vendors["fundamental_data"] = "akshare"
-    vendors["news_data"] = "akshare"
-    config["data_vendors"] = vendors
+    market = resolve_market(ticker)
+
+    if market == Market.A_SHARE:
+        vendors = dict(config.get("data_vendors") or {})
+        # All three categories overlaid for A-share:
+        vendors["core_stock_apis"] = "akshare"
+        vendors["fundamental_data"] = "akshare"
+        vendors["news_data"] = "akshare"
+        config["data_vendors"] = vendors
+
+    elif market == Market.HK:
+        # Per-method overrides only for the two HK-supported endpoints.
+        # Do NOT touch data_vendors (yfinance remains default for all categories).
+        tool_overrides = dict(config.get("tool_vendors") or {})
+        tool_overrides["get_stock_data"] = "akshare"
+        tool_overrides["get_fundamentals"] = "akshare"
+        config["tool_vendors"] = tool_overrides
+
+    # else: US, CRYPTO — no-op
