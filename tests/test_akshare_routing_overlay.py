@@ -24,9 +24,10 @@ def test_overlay_sets_akshare_for_a_share():
     apply_china_vendor_overlay(cfg, "600519")
 
     assert cfg["data_vendors"]["core_stock_apis"] == "akshare"
+    # Phase 3: fundamental_data also overlaid
+    assert cfg["data_vendors"]["fundamental_data"] == "akshare"
     # Other categories untouched
     assert cfg["data_vendors"]["technical_indicators"] == "yfinance"
-    assert cfg["data_vendors"]["fundamental_data"] == "yfinance"
     assert cfg["data_vendors"]["news_data"] == "yfinance"
 
 
@@ -91,12 +92,16 @@ def test_overlay_does_not_mutate_global_default_config():
     cfg = dc.DEFAULT_CONFIG.copy()
     apply_china_vendor_overlay(cfg, "600519")
 
-    # cfg should see akshare
+    # cfg should see akshare for both overlaid categories
     assert cfg["data_vendors"]["core_stock_apis"] == "akshare"
+    assert cfg["data_vendors"]["fundamental_data"] == "akshare"
 
     # DEFAULT_CONFIG must remain untouched
     assert dc.DEFAULT_CONFIG["data_vendors"]["core_stock_apis"] == "yfinance", (
         "apply_china_vendor_overlay mutated DEFAULT_CONFIG in place — aliasing bug!"
+    )
+    assert dc.DEFAULT_CONFIG["data_vendors"]["fundamental_data"] == "yfinance", (
+        "apply_china_vendor_overlay mutated DEFAULT_CONFIG fundamental_data — aliasing bug!"
     )
 
 

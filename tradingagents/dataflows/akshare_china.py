@@ -132,12 +132,252 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     return header + df.to_csv()
 
 
+def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
+    """Return A-share company fundamentals as a formatted label/value string.
+
+    Parameters
+    ----------
+    ticker:
+        A-share ticker — bare 6-digit code or with exchange suffix.
+    curr_date:
+        Accepted but not currently used; included to match the yfinance
+        vendor's signature.
+
+    Returns
+    -------
+    str
+        On success: a 2-line ``#`` header followed by a blank line and then
+        ``"Label: value"`` lines, one per indicator (latest period value).
+        On empty/error: a plain-text message (never raises).
+    """
+    if resolve_market(ticker) != Market.A_SHARE:
+        return (
+            f"This vendor handles A-share data only. "
+            f"'{ticker}' was classified as non-A-share. "
+            "Please use the appropriate vendor for this symbol."
+        )
+
+    code = ticker.strip().upper().split(".")[0]
+
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: A-share data source unavailable ({exc})"
+
+    try:
+        df = ak.stock_financial_abstract(symbol=code)
+    except Exception as exc:
+        return f"Error: failed to fetch A-share fundamentals for {ticker}: {exc}"
+
+    if df is None or df.empty:
+        return f"No fundamentals data found for symbol '{ticker}'"
+
+    try:
+        # The DataFrame is long-form: first column = item name, remaining = period values.
+        # Emit label: latest-period-value pairs.
+        item_col = df.columns[0]
+        # Use the second column (most recent period) as the value column
+        value_col = df.columns[1]
+        lines = []
+        for _, row in df.iterrows():
+            lines.append(f"{row[item_col]}: {row[value_col]}")
+
+        retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        header = (
+            f"# Company Fundamentals for {ticker.strip().upper()}\n"
+            f"# Data retrieved on: {retrieved_at}\n"
+            "\n"
+        )
+        return header + "\n".join(lines)
+    except Exception as exc:
+        return f"Error: unexpected A-share fundamentals response for {ticker}: {exc}"
+
+
+def _filter_by_curr_date(df: "pd.DataFrame", curr_date: str | None) -> "pd.DataFrame":
+    """Best-effort filter: drop rows whose date-like column value > curr_date.
+
+    Looks for a column whose name contains any of REPORT_DATE / 报告期 / 报告日期
+    (case-insensitive).  If no such column is found, returns the DataFrame unchanged.
+    """
+    if curr_date is None or df is None or df.empty:
+        return df
+
+    date_col = None
+    target_substrings = ("report_date", "报告期", "报告日期")
+    for col in df.columns:
+        col_lower = col.lower()
+        if any(sub in col_lower for sub in target_substrings):
+            date_col = col
+            break
+
+    if date_col is None:
+        return df
+
+    try:
+        mask = pd.to_datetime(df[date_col], errors="coerce") <= pd.Timestamp(curr_date)
+        return df[mask]
+    except Exception:
+        # If comparison fails for any reason, skip filter silently
+        return df
+
+
+def _financial_statement(
+    ticker: str,
+    freq: str,
+    curr_date: str | None,
+    ak_method_name: str,
+    title: str,
+    empty_msg_kind: str,
+    error_kind: str,
+) -> str:
+    """Shared implementation for balance_sheet / cashflow / income_statement."""
+    if resolve_market(ticker) != Market.A_SHARE:
+        return (
+            f"This vendor handles A-share data only. "
+            f"'{ticker}' was classified as non-A-share. "
+            "Please use the appropriate vendor for this symbol."
+        )
+
+    code = ticker.strip().upper().split(".")[0]
+
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: A-share data source unavailable ({exc})"
+
+    try:
+        method = getattr(ak, ak_method_name)
+        df = method(symbol=code)
+    except Exception as exc:
+        return f"Error: failed to fetch {error_kind} for {ticker}: {exc}"
+
+    if df is None or df.empty:
+        return f"No {empty_msg_kind} data found for symbol '{ticker}'"
+
+    try:
+        df = _filter_by_curr_date(df, curr_date)
+        if df is None or df.empty:
+            return f"No {empty_msg_kind} data found for symbol '{ticker}'"
+
+        retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        header = (
+            f"# {title} for {ticker.strip().upper()} ({freq})\n"
+            f"# Data retrieved on: {retrieved_at}\n"
+            "\n"
+        )
+        return header + df.to_csv()
+    except Exception as exc:
+        return f"Error: unexpected A-share {error_kind} response for {ticker}: {exc}"
+
+
+def get_balance_sheet(
+    ticker: str, freq: str = "quarterly", curr_date: str | None = None
+) -> str:
+    """Return A-share balance sheet data as a header + CSV string.
+
+    Parameters
+    ----------
+    ticker:
+        A-share ticker — bare 6-digit code or with exchange suffix.
+    freq:
+        Accepted to match the yfinance vendor's signature; not used to select
+        akshare endpoint (the EM endpoint returns all periods).
+    curr_date:
+        If provided and a date-like column (REPORT_DATE / 报告期 / 报告日期) is
+        present, rows with date > curr_date are dropped.  If no date column is
+        found the filter is silently skipped.
+
+    Returns
+    -------
+    str
+        Header + ``df.to_csv()`` or a plain-text error message (never raises).
+    """
+    return _financial_statement(
+        ticker=ticker,
+        freq=freq,
+        curr_date=curr_date,
+        ak_method_name="stock_balance_sheet_by_report_em",
+        title="Balance Sheet data",
+        empty_msg_kind="balance sheet",
+        error_kind="A-share balance sheet",
+    )
+
+
+def get_cashflow(
+    ticker: str, freq: str = "quarterly", curr_date: str | None = None
+) -> str:
+    """Return A-share cash flow data as a header + CSV string.
+
+    Parameters
+    ----------
+    ticker:
+        A-share ticker — bare 6-digit code or with exchange suffix.
+    freq:
+        Accepted to match the yfinance vendor's signature; not used to select
+        akshare endpoint.
+    curr_date:
+        Best-effort date filter; see ``get_balance_sheet`` for details.
+
+    Returns
+    -------
+    str
+        Header + ``df.to_csv()`` or a plain-text error message (never raises).
+    """
+    return _financial_statement(
+        ticker=ticker,
+        freq=freq,
+        curr_date=curr_date,
+        ak_method_name="stock_cash_flow_sheet_by_report_em",
+        title="Cash Flow data",
+        empty_msg_kind="cash flow",
+        error_kind="A-share cash flow",
+    )
+
+
+def get_income_statement(
+    ticker: str, freq: str = "quarterly", curr_date: str | None = None
+) -> str:
+    """Return A-share income statement (profit sheet) data as a header + CSV string.
+
+    Parameters
+    ----------
+    ticker:
+        A-share ticker — bare 6-digit code or with exchange suffix.
+    freq:
+        Accepted to match the yfinance vendor's signature; not used to select
+        akshare endpoint.
+    curr_date:
+        Best-effort date filter; see ``get_balance_sheet`` for details.
+
+    Returns
+    -------
+    str
+        Header + ``df.to_csv()`` or a plain-text error message (never raises).
+    """
+    return _financial_statement(
+        ticker=ticker,
+        freq=freq,
+        curr_date=curr_date,
+        ak_method_name="stock_profit_sheet_by_report_em",
+        title="Income Statement data",
+        empty_msg_kind="income statement",
+        error_kind="A-share income statement",
+    )
+
+
 def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     """Route A-share tickers to the 'akshare' vendor for THIS run only.
+
+    Phase 3 overlay sets:
+    - ``core_stock_apis``   → ``"akshare"``  (OHLCV price data)
+    - ``fundamental_data``  → ``"akshare"``  (balance_sheet / cashflow /
+                                               income_statement / fundamentals)
 
     HK tickers are intentionally NOT routed here yet; they keep using the
     default yfinance vendor until HK data fetching is implemented in a
     later phase.
+
+    news_data overlay is deferred to Phase 4.
 
     The function REPLACES config["data_vendors"] with a fresh dict rather
     than mutating it in place.  The call sites pass a SHALLOW
@@ -148,7 +388,9 @@ def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     if resolve_market(ticker) != Market.A_SHARE:
         return
     vendors = dict(config.get("data_vendors") or {})
-    # Only core_stock_apis is implemented today; fundamental_data / news_data
-    # will be added to this overlay in later phases.
+    # Phase 3: core_stock_apis + fundamental_data (balance_sheet/cashflow/
+    # income_statement/fundamentals) are all handled by akshare for A-share.
+    # news_data will be added in a later phase.
     vendors["core_stock_apis"] = "akshare"
+    vendors["fundamental_data"] = "akshare"
     config["data_vendors"] = vendors
