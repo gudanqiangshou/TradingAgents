@@ -1,5 +1,5 @@
 """
-Tests for tradingagents/dataflows/_dep_bootstrap.py
+Tests for tradingagents/dataflows/_dep_bootstrap.py  (includes uv-pip fallback)
 
 All tests are unit tests: zero real pip installs, zero real network calls.
 subprocess.run and importlib.import_module are mocked throughout.
@@ -126,7 +126,8 @@ def test_installs_then_imports_on_missing():
     mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
 
     with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
-         patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess), \
+         patch(f"{_MOD_PATH}.shutil.which", return_value=None):
 
         result = mod.ensure("akshare")
 
@@ -395,3 +396,105 @@ def test_pip_succeeds_but_import_still_fails():
             "subprocess.run must NOT be called again after post-install ImportError "
             "(single-flight set should have recorded the failure)"
         )
+
+
+# ---------------------------------------------------------------------------
+# uv-pip fallback tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_uv_install_argv_when_uv_available():
+    """When uv is on PATH, _install_argv returns uv pip install with --python <exe>."""
+    import shutil as _real_shutil
+
+    mod = _import_bootstrap()
+
+    fake_pkg = _make_fake_module("akshare")
+    state = {"pip_ran": False}
+
+    def side_effect_import(name, *args, **kwargs):
+        if not state["pip_ran"]:
+            raise ImportError(f"No module named '{name}'")
+        return fake_pkg
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.stderr = ""
+
+    def run_side_effect(*args, **kwargs):
+        state["pip_ran"] = True
+        return mock_proc
+
+    mock_importlib = MagicMock(wraps=_real_importlib)
+    mock_importlib.import_module.side_effect = side_effect_import
+    mock_importlib.invalidate_caches = MagicMock()
+
+    mock_subprocess = MagicMock()
+    mock_subprocess.run.side_effect = run_side_effect
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
+
+    with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess), \
+         patch(f"{_MOD_PATH}.shutil.which", return_value="/usr/local/bin/uv"):
+
+        result = mod.ensure("akshare")
+
+    assert result is fake_pkg
+    mock_subprocess.run.assert_called_once()
+
+    argv = mock_subprocess.run.call_args[0][0]
+    assert argv[0] == "uv", f"Expected 'uv' as first element, got: {argv[0]}"
+    assert argv[1:3] == ["pip", "install"], f"Expected ['pip', 'install'], got: {argv[1:3]}"
+    assert "--python" in argv
+    python_idx = argv.index("--python")
+    assert argv[python_idx + 1] == sys.executable
+
+    for spec in mod.CHINA_DATA_PINS:
+        assert spec in argv, f"Expected '{spec}' in argv but got: {argv}"
+
+
+@pytest.mark.unit
+def test_pip_install_argv_when_uv_absent():
+    """When uv is NOT on PATH, _install_argv returns python -m pip install --quiet (existing behavior)."""
+    mod = _import_bootstrap()
+
+    fake_pkg = _make_fake_module("akshare")
+    state = {"pip_ran": False}
+
+    def side_effect_import(name, *args, **kwargs):
+        if not state["pip_ran"]:
+            raise ImportError(f"No module named '{name}'")
+        return fake_pkg
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.stderr = ""
+
+    def run_side_effect(*args, **kwargs):
+        state["pip_ran"] = True
+        return mock_proc
+
+    mock_importlib = MagicMock(wraps=_real_importlib)
+    mock_importlib.import_module.side_effect = side_effect_import
+    mock_importlib.invalidate_caches = MagicMock()
+
+    mock_subprocess = MagicMock()
+    mock_subprocess.run.side_effect = run_side_effect
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
+
+    with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess), \
+         patch(f"{_MOD_PATH}.shutil.which", return_value=None):
+
+        result = mod.ensure("akshare")
+
+    assert result is fake_pkg
+    mock_subprocess.run.assert_called_once()
+
+    argv = mock_subprocess.run.call_args[0][0]
+    assert argv[0] == sys.executable, f"Expected sys.executable as first element, got: {argv[0]}"
+    assert argv[1:4] == ["-m", "pip", "install"], f"Expected ['-m', 'pip', 'install'], got: {argv[1:4]}"
+    assert "--quiet" in argv
+
+    for spec in mod.CHINA_DATA_PINS:
+        assert spec in argv, f"Expected '{spec}' in argv but got: {argv}"

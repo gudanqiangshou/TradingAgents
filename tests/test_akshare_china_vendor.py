@@ -195,11 +195,13 @@ def test_non_a_share_symbol_returns_clear_message():
 
 @pytest.mark.unit
 def test_akshare_runtime_exception_returns_error_string():
-    """Network/runtime errors from akshare must be caught; function returns error string, never raises."""
+    """Network/runtime errors from both sources must be caught; function returns error string, never raises."""
     import tradingagents.dataflows.akshare_china as _vendor_mod
 
     fake_ak = MagicMock()
     fake_ak.stock_zh_a_hist.side_effect = ConnectionError("timeout")
+    # With the Sina fallback in place, Sina must also fail for the error string to be returned
+    fake_ak.stock_zh_a_daily.side_effect = ConnectionError("timeout")
 
     with patch(
         "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
@@ -233,3 +235,184 @@ def test_invalid_date_returns_error_string():
     assert isinstance(result, str)
     assert "Error" in result
     assert "2026/01/05" in result
+
+
+# ---------------------------------------------------------------------------
+# Sina fallback tests
+# ---------------------------------------------------------------------------
+
+def _make_sina_df(rows=None):
+    """Return a DataFrame that mimics ak.stock_zh_a_daily output (English lowercase cols)."""
+    import datetime as dt
+    if rows is None:
+        rows = [
+            {
+                "date": dt.date(2024, 1, 2),
+                "open": 1700.5,
+                "high": 1720.0,
+                "low": 1695.0,
+                "close": 1715.0,
+                "volume": 3000000,
+                "amount": 5.1e9,
+                "outstanding_share": 1.26e9,
+                "turnover": 0.0024,
+            },
+            {
+                "date": dt.date(2024, 1, 3),
+                "open": 1716.0,
+                "high": 1730.5,
+                "low": 1710.0,
+                "close": 1725.5,
+                "volume": 3200000,
+                "amount": 5.5e9,
+                "outstanding_share": 1.26e9,
+                "turnover": 0.0025,
+            },
+        ]
+    return pd.DataFrame(rows)
+
+
+def _make_sina_empty_df():
+    return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume",
+                                  "amount", "outstanding_share", "turnover"])
+
+
+@pytest.mark.unit
+def test_a_share_falls_back_to_sina_when_eastmoney_raises():
+    """When eastmoney raises, Sina fallback succeeds and produces correct output."""
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_a_hist.side_effect = ConnectionError("proxy")
+    fake_ak.stock_zh_a_daily.return_value = _make_sina_df()
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = _vendor_mod.get_stock_data("600519", "2024-01-02", "2024-01-12")
+
+    # Must not raise; result is a string
+    assert isinstance(result, str)
+
+    # Header contract
+    assert result.startswith("# Stock data for 600519 from 2024-01-02 to 2024-01-12")
+
+    # CSV header present
+    assert "Date,Open,High,Low,Close,Volume" in result
+
+    # eastmoney was tried first
+    assert fake_ak.stock_zh_a_hist.call_count >= 1
+
+    # Sina was called with the correct sh-prefixed symbol
+    fake_ak.stock_zh_a_daily.assert_called_once_with(
+        symbol="sh600519",
+        start_date="20240102",
+        end_date="20240112",
+        adjust="qfq",
+    )
+
+
+@pytest.mark.unit
+def test_a_share_falls_back_to_sina_when_eastmoney_returns_empty():
+    """When eastmoney returns an empty df, Sina fallback succeeds."""
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_a_hist.return_value = _make_ak_empty_df()
+    fake_ak.stock_zh_a_daily.return_value = _make_sina_df()
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = _vendor_mod.get_stock_data("600519", "2024-01-02", "2024-01-12")
+
+    assert isinstance(result, str)
+    assert result.startswith("# Stock data for 600519 from 2024-01-02 to 2024-01-12")
+    assert "Date,Open,High,Low,Close,Volume" in result
+
+    # Sina was called with correct sh prefix
+    fake_ak.stock_zh_a_daily.assert_called_once_with(
+        symbol="sh600519",
+        start_date="20240102",
+        end_date="20240112",
+        adjust="qfq",
+    )
+
+
+@pytest.mark.unit
+def test_a_share_sina_uses_sz_prefix_for_000_code():
+    """For 000xxx codes (Shenzhen), Sina symbol must use 'sz' prefix."""
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_a_hist.side_effect = ConnectionError("proxy")
+    fake_ak.stock_zh_a_daily.return_value = _make_sina_df()
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = _vendor_mod.get_stock_data("000001", "2024-01-02", "2024-01-12")
+
+    assert isinstance(result, str)
+    # Sina called with sz prefix
+    fake_ak.stock_zh_a_daily.assert_called_once_with(
+        symbol="sz000001",
+        start_date="20240102",
+        end_date="20240112",
+        adjust="qfq",
+    )
+
+
+@pytest.mark.unit
+def test_a_share_both_sources_fail_returns_error_string():
+    """When both eastmoney and Sina raise, result is an 'Error: ...' string (never raises)."""
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_a_hist.side_effect = ConnectionError("proxy")
+    fake_ak.stock_zh_a_daily.side_effect = RuntimeError("sina down")
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = _vendor_mod.get_stock_data("600519", "2024-01-02", "2024-01-12")
+
+    assert isinstance(result, str)
+    assert result.lower().startswith("error:")
+    assert "600519" in result
+
+
+@pytest.mark.unit
+def test_a_share_both_sources_empty_returns_no_data_string():
+    """When both eastmoney and Sina return empty dfs, result is the 'No data found' string."""
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_a_hist.return_value = _make_ak_empty_df()
+    fake_ak.stock_zh_a_daily.return_value = _make_sina_empty_df()
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = _vendor_mod.get_stock_data("600519", "2024-01-02", "2024-01-12")
+
+    assert result == "No data found for symbol '600519' between 2024-01-02 and 2024-01-12"
+
+
+@pytest.mark.unit
+def test_a_share_eastmoney_success_sina_never_called(fake_ak):
+    """When eastmoney returns rows, Sina must never be called."""
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        from tradingagents.dataflows.akshare_china import get_stock_data
+        result = get_stock_data("600519", "2026-01-05", "2026-01-09")
+
+    assert result.startswith("# Stock data for 600519 from 2026-01-05 to 2026-01-09")
+    fake_ak.stock_zh_a_daily.assert_not_called()

@@ -1,5 +1,6 @@
 """Self-contained AkShare A-share data vendor; akshare loaded on demand."""
 
+import logging
 from datetime import datetime
 
 import pandas as pd
@@ -7,6 +8,28 @@ import pandas as pd
 from tradingagents.dataflows import _dep_bootstrap
 from tradingagents.dataflows.config import get_config as _config_get
 from tradingagents.market_resolver import resolve_market, Market
+
+logger = logging.getLogger(__name__)
+
+
+def _sina_prefix(code: str) -> str:
+    """Return the Sina/akshare exchange prefix for a bare 6-digit A-share code.
+
+    Prefix rules (same as akshare CN convention):
+      - first 2 digits in {60, 68, 90}  → "sh"
+      - first 2 digits in {00, 30, 20}  → "sz"
+      - first char in {8, 4}            → "bj"
+      - fallback                        → "sh"
+    """
+    two = code[:2]
+    one = code[:1]
+    if two in {"60", "68", "90"}:
+        return "sh"
+    if two in {"00", "30", "20"}:
+        return "sz"
+    if one in {"8", "4"}:
+        return "bj"
+    return "sh"
 
 
 def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
@@ -83,8 +106,13 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     # ------------------------------------------------------------------
     # Fetch data — catch arbitrary scraping errors
     # ------------------------------------------------------------------
-    try:
-        if market == Market.A_SHARE:
+    if market == Market.A_SHARE:
+        # --- Multi-source try chain: eastmoney → Sina fallback ---
+        _a_exc: Exception | None = None
+        _source: str = "eastmoney"
+
+        # Source 1: eastmoney (existing)
+        try:
             df = ak.stock_zh_a_hist(
                 symbol=code,
                 period="daily",
@@ -92,11 +120,54 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
                 end_date=ak_end,
                 adjust="qfq",
             )
+        except Exception as exc:
+            _a_exc = exc
+            df = None
+
+        # Source 2: Sina fallback (if eastmoney failed or returned empty)
+        if df is None or (hasattr(df, "empty") and df.empty):
+            prefix = _sina_prefix(code)
+            sina_symbol = prefix + code
+            try:
+                df_sina = ak.stock_zh_a_daily(
+                    symbol=sina_symbol,
+                    start_date=ak_start,
+                    end_date=ak_end,
+                    adjust="qfq",
+                )
+                if df_sina is None or (hasattr(df_sina, "empty") and df_sina.empty):
+                    # Both sources empty — let the empty-result check below handle it
+                    df = df_sina
+                    _source = "sina"
+                else:
+                    # Sina succeeded — normalize to standard schema inline
+                    df_sina = df_sina.rename(columns=str.capitalize)
+                    # Drop extra Sina columns, keep only what we need
+                    sina_keep = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df_sina.columns]
+                    df = df_sina[sina_keep].copy()
+                    _source = "sina"
+                    logger.info(
+                        "A-share data for %s: eastmoney unavailable, used Sina fallback",
+                        symbol,
+                    )
+                    # Early-return path via normalized df into shape guard below
+            except Exception as sina_exc:
+                # Both sources failed
+                if _a_exc is not None:
+                    last_exc = _a_exc
+                else:
+                    last_exc = sina_exc
+                return (
+                    f"Error: failed to fetch A-share data for {symbol}: {last_exc}"
+                )
         else:
+            logger.info("A-share data for %s: eastmoney source succeeded", symbol)
+    else:
+        try:
             # HK: no start/end date params — returns all history; filter client-side
             df = ak.stock_hk_daily(symbol=code, adjust="qfq")
-    except Exception as exc:
-        return f"Error: failed to fetch {kind} data for {symbol}: {exc}"
+        except Exception as exc:
+            return f"Error: failed to fetch {kind} data for {symbol}: {exc}"
 
     # ------------------------------------------------------------------
     # Empty result
@@ -111,6 +182,9 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     # ------------------------------------------------------------------
     try:
         if market == Market.A_SHARE:
+            # If df already has capitalized English columns (from Sina normalization above),
+            # the rename below is a no-op for those columns.  If it has Chinese columns
+            # (from eastmoney), they get renamed.  Either way we end up with the same shape.
             col_map = {
                 "日期": "Date",
                 "开盘": "Open",

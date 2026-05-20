@@ -18,6 +18,7 @@ Stdlib-only: importlib, subprocess, sys, threading, time, logging, types.
 
 import importlib
 import logging
+import shutil
 import subprocess
 import sys
 import threading
@@ -38,6 +39,21 @@ CHINA_DATA_PINS: list[str] = [
     "akshare>=1.17.86",
     "curl_cffi>=0.7.0",
 ]
+
+# ---------------------------------------------------------------------------
+# Helper: choose pip or uv-pip installer command
+# ---------------------------------------------------------------------------
+
+def _install_argv(specs: list) -> list:
+    """Return the subprocess argv to install *specs*.
+
+    Prefers ``uv pip install`` when ``uv`` is on PATH (uv venvs lack pip by
+    default).  Falls back to ``python -m pip install`` otherwise.
+    """
+    if shutil.which("uv"):
+        return ["uv", "pip", "install", "--python", sys.executable, *specs]
+    return [sys.executable, "-m", "pip", "install", "--quiet", *specs]
+
 
 # ---------------------------------------------------------------------------
 # Module-level state — all guarded by _install_lock
@@ -111,9 +127,14 @@ def ensure(
             )
 
         specs = pip_specs if pip_specs is not None else CHINA_DATA_PINS
-        cmd = [sys.executable, "-m", "pip", "install", "--quiet", *specs]
+        cmd = _install_argv(specs)
 
-        logger.info("installing %s via %s", specs, sys.executable)
+        logger.info(
+            "installing %s via %s (installer: %s)",
+            specs,
+            sys.executable,
+            cmd[0],
+        )
         t0 = time.monotonic()
 
         try:
