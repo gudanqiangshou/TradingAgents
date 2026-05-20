@@ -6,10 +6,24 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from tradingagents.dataflows import _dep_bootstrap
-from tradingagents.dataflows.config import get_config as _config_get
+from tradingagents.dataflows.config import get_config as _config_get, replace_section
 from tradingagents.market_resolver import resolve_market, Market
 
 logger = logging.getLogger(__name__)
+
+
+def _df_is_empty(df) -> bool:
+    """Treat None, non-DataFrame, and empty DataFrame uniformly.
+
+    Used at every akshare call-site empty-check to guard against endpoint
+    returning a list (``[]``) instead of an empty ``pd.DataFrame``.
+    """
+    if df is None:
+        return True
+    if not isinstance(df, pd.DataFrame):
+        return True
+    return df.empty
+
 
 # Sync with tradingagents/dataflows/y_finance.py:get_stock_stats_indicators_window
 _INDICATOR_CATALOG: dict[str, str] = {
@@ -138,7 +152,7 @@ def _fetch_a_share_ohlcv(ak, code: str, start_yyyymmdd: str, end_yyyymmdd: str) 
         df = None
 
     # If eastmoney succeeded with rows, normalize Chinese columns and return
-    if df is not None and not df.empty:
+    if not _df_is_empty(df):
         try:
             col_map = {
                 "日期": "Date",
@@ -179,7 +193,7 @@ def _fetch_a_share_ohlcv(ak, code: str, start_yyyymmdd: str, end_yyyymmdd: str) 
         _any_exc = True
         df_sina = None
 
-    if df_sina is not None and not df_sina.empty:
+    if not _df_is_empty(df_sina):
         try:
             # Normalize Sina columns (lowercase → capitalize)
             df_sina = df_sina.rename(columns=str.capitalize)
@@ -300,7 +314,7 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     # ------------------------------------------------------------------
     # Empty result
     # ------------------------------------------------------------------
-    if df is None or df.empty:
+    if _df_is_empty(df):
         return (
             f"No data found for symbol '{symbol}' between {start_date} and {end_date}"
         )
@@ -418,7 +432,7 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
     except Exception as exc:
         return f"Error: failed to fetch {kind} fundamentals for {ticker}: {exc}"
 
-    if df is None or df.empty:
+    if _df_is_empty(df):
         return f"No fundamentals data found for symbol '{ticker}'"
 
     try:
@@ -515,7 +529,7 @@ def _filter_by_curr_date(df: "pd.DataFrame", curr_date: str | None) -> "pd.DataF
     Looks for a column whose name contains any of REPORT_DATE / 报告期 / 报告日期
     (case-insensitive).  If no such column is found, returns the DataFrame unchanged.
     """
-    if curr_date is None or df is None or df.empty:
+    if curr_date is None or _df_is_empty(df):
         return df
 
     date_col = None
@@ -567,12 +581,12 @@ def _financial_statement(
     except Exception as exc:
         return f"Error: failed to fetch {error_kind} for {ticker}: {exc}"
 
-    if df is None or df.empty:
+    if _df_is_empty(df):
         return f"No {empty_msg_kind} data found for symbol '{ticker}'"
 
     try:
         df = _filter_by_curr_date(df, curr_date)
-        if df is None or df.empty:
+        if _df_is_empty(df):
             return f"No {empty_msg_kind} data found for symbol '{ticker}'"
 
         retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -748,7 +762,8 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
         if len(df) == 0:
             return f"No news found for {ticker}"
         return f"Error: unexpected A-share news response for {ticker}: got {type(df).__name__}, expected DataFrame"
-    if df.empty:
+    # Use helper (consistent with other empty-check sites)
+    if _df_is_empty(df):
         return f"No news found for {ticker}"
 
     # ------------------------------------------------------------------
@@ -893,6 +908,18 @@ def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days: 
             f"Error: invalid date format for {curr_date!r}; expected yyyy-mm-dd"
         )
 
+    # 3b. Coerce look_back_days to int — LLM agents may pass a string (e.g. "30")
+    try:
+        look_back_days = int(look_back_days)
+    except (TypeError, ValueError):
+        return (
+            f"Error: look_back_days must be coercible to int, got {look_back_days!r}"
+        )
+    if look_back_days < 0:
+        return (
+            f"Error: look_back_days must be non-negative, got {look_back_days}"
+        )
+
     # 4. Compute fetch window (generous: 400 extra days for 200-SMA + buffer)
     fetch_start_dt = curr_date_dt - timedelta(days=look_back_days + 400)
     fetch_start = fetch_start_dt.strftime("%Y%m%d")
@@ -974,70 +1001,89 @@ def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days: 
 def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     """Route A-share or HK tickers to the 'akshare' vendor for THIS run only.
 
-    **Always-reset design (critical for correctness):**
-    This function ALWAYS writes fresh ``data_vendors`` and ``tool_vendors``
-    dicts into *config*, regardless of market and regardless of what was
-    previously in those keys.  This prevents a well-known pollution bug:
-    ``tradingagents/dataflows/config.py:set_config`` does a one-level nested-dict
-    MERGE (not replace), so a stale ``tool_vendors={"get_stock_data":"akshare"}``
-    left from a prior HK run survives unchanged when a subsequent US/CRYPTO call
-    passes ``tool_vendors={}`` — the merge is a no-op.  By always writing the
-    full desired state here, every overlay call produces a known clean slate.
+    **Differential overlay design (critical for correctness):**
+    This function preserves any caller-set non-akshare entries (Important 6),
+    clears any stale akshare entries left from a prior run in the owned key
+    sets (Critical 1), then applies the akshare keys appropriate for the
+    current ticker's market.  All writes are propagated to the global
+    ``_config`` via :func:`tradingagents.dataflows.config.replace_section`,
+    which uses REPLACE semantics — defeating
+    ``tradingagents/dataflows/config.py:set_config``'s merge-only behaviour.
+
+    Owned key sets (keys this function may add or remove):
+      ``_AKSHARE_DATA_VENDOR_KEYS`` — four ``data_vendors`` category keys.
+      ``_AKSHARE_TOOL_VENDOR_KEYS`` — two ``tool_vendors`` method keys.
+
+    Contract:
+    (a) Caller's custom non-akshare entries (e.g. ``{"get_news":"alpha_vantage"}``)
+        are preserved — only the owned akshare keys are touched.
+    (b) Stale akshare entries from prior runs in the owned keys are cleared,
+        then the appropriate set is written for the current ticker.
+    (c) Both local *config* and the global ``_config`` are updated, so any
+        subsequent ``set_config(config)`` merge cannot leave stale keys.
 
     Design: A_SHARE vs HK use fundamentally different overlay strategies
     because AkShare covers different methods for each market.
 
     **A_SHARE** (category-wide overlay):
-    Resets ``config["data_vendors"]`` to a fresh copy of the default and
-    overrides all four data categories:
-    - ``core_stock_apis``       → ``"akshare"``  (OHLCV price data)
-    - ``fundamental_data``      → ``"akshare"``  (balance_sheet / cashflow /
-                                                   income_statement / fundamentals)
-    - ``news_data``             → ``"akshare"``  (per-stock news via stock_news_em)
-    - ``technical_indicators``  → ``"akshare"``  (indicators via stockstats + eastmoney/Sina)
-    Resets ``config["tool_vendors"]`` to ``{}`` (no per-method overrides needed).
+    Sets the four ``data_vendors`` category keys to ``"akshare"``.
+    Does NOT set any ``tool_vendors`` keys.
 
     **HK** (per-method tool_vendors overlay):
-    AkShare only covers HK OHLCV (``stock_hk_daily``) and HK key indicators
-    (``stock_financial_hk_analysis_indicator_em``).  Statements and news are
-    NOT available from AkShare for HK, so those fall back to yfinance.
-    Resets ``config["data_vendors"]`` to the default (yfinance for all
-    categories) and sets per-method overrides in ``config["tool_vendors"]``:
-    - ``get_stock_data``   → ``"akshare"``
-    - ``get_fundamentals`` → ``"akshare"``
+    AkShare only covers HK OHLCV and key indicators; statements/news fall
+    back to yfinance.  Sets the two ``tool_vendors`` method keys to
+    ``"akshare"``.  Does NOT modify ``data_vendors``.
 
-    **US / CRYPTO**: resets both ``data_vendors`` and ``tool_vendors`` to the
-    default/empty state so any stale pollution from a prior A-share or HK run
-    is cleared.
+    **US / CRYPTO**: clearing-only — stale akshare entries removed from both
+    owned key sets; no new akshare entries added.
 
     Aliasing safety:
-    All paths create fresh dicts rather than mutating any nested dict in place.
-    Call sites may pass a SHALLOW ``DEFAULT_CONFIG.copy()``, so
-    ``config["data_vendors"]`` and ``config["tool_vendors"]`` could be the SAME
-    objects as in the module-global ``DEFAULT_CONFIG``; mutating them in place
-    would corrupt that global.
+    All paths work on local ``dict(...)`` copies of the caller's nested dicts
+    before assigning back, so in-place mutation of shared dict objects
+    (e.g. from a shallow ``DEFAULT_CONFIG.copy()``) never occurs.
     """
     from tradingagents.default_config import DEFAULT_CONFIG  # local import avoids circularity
 
+    # Keys this function "owns" — it may add or remove these only
+    _AKSHARE_DATA_VENDOR_KEYS = (
+        "core_stock_apis", "fundamental_data", "news_data", "technical_indicators"
+    )
+    _AKSHARE_TOOL_VENDOR_KEYS = ("get_stock_data", "get_fundamentals")
+
     market = resolve_market(ticker)
 
-    # Baseline: always reset both dicts to clean defaults first.
-    # This clears any pollution left by a prior overlay call for a different market.
-    config["data_vendors"] = dict(DEFAULT_CONFIG["data_vendors"])
-    config["tool_vendors"] = {}
+    # Work on shallow copies of the caller's nested dicts (aliasing-safe)
+    data_vendors = dict(config.get("data_vendors") or {})
+    tool_vendors = dict(config.get("tool_vendors") or {})
 
+    # Step 1: clear any stale akshare entries in the owned key sets
+    for key in _AKSHARE_DATA_VENDOR_KEYS:
+        if data_vendors.get(key) == "akshare":
+            data_vendors[key] = DEFAULT_CONFIG["data_vendors"].get(key, "yfinance")
+    for key in _AKSHARE_TOOL_VENDOR_KEYS:
+        if tool_vendors.get(key) == "akshare":
+            tool_vendors.pop(key, None)
+
+    # Step 2: apply the current-ticker overlay
     if market == Market.A_SHARE:
-        # All four categories overlaid for A-share (data_vendors already fresh from baseline):
-        config["data_vendors"]["core_stock_apis"] = "akshare"
-        config["data_vendors"]["fundamental_data"] = "akshare"
-        config["data_vendors"]["news_data"] = "akshare"
-        config["data_vendors"]["technical_indicators"] = "akshare"
-        # tool_vendors stays {} (set by baseline)
+        # All four data_vendor categories → akshare
+        for key in _AKSHARE_DATA_VENDOR_KEYS:
+            data_vendors[key] = "akshare"
+        # tool_vendors: do NOT add any keys (akshare handles A-share via data_vendors)
 
     elif market == Market.HK:
-        # data_vendors stays at yfinance defaults (set by baseline).
-        # Per-method overrides only for the two HK-supported endpoints:
-        config["tool_vendors"]["get_stock_data"] = "akshare"
-        config["tool_vendors"]["get_fundamentals"] = "akshare"
+        # data_vendors: unchanged (clearing in step 1 already reset stale A-share entries)
+        # tool_vendors: set the two HK-supported per-method overrides
+        for key in _AKSHARE_TOOL_VENDOR_KEYS:
+            tool_vendors[key] = "akshare"
 
-    # else: US, CRYPTO — baseline already set clean defaults; nothing more to do.
+    # else: US, CRYPTO — clearing-only (step 1 already removed stale keys)
+
+    # Write back to local config
+    config["data_vendors"] = data_vendors
+    config["tool_vendors"] = tool_vendors
+
+    # Propagate REPLACE to global _config so set_config's merge semantics can't
+    # leave stale akshare keys in _config after a subsequent set_config(config) call.
+    replace_section("data_vendors", data_vendors)
+    replace_section("tool_vendors", tool_vendors)

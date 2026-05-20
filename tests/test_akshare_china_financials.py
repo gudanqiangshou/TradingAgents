@@ -636,3 +636,33 @@ class TestGetIncomeStatement:
             _vendor_mod.get_income_statement("600519.SS")
         call_kwargs = ak.stock_profit_sheet_by_report_em.call_args[1]
         assert call_kwargs["symbol"] == "600519"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: list-return resilience for financial statement methods
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_return", [[], None, pd.Series([1, 2, 3]), pd.DataFrame()])
+@pytest.mark.parametrize("method_name,ak_attr,expected_fragment", [
+    ("get_fundamentals",    "stock_financial_abstract",               "No fundamentals data"),
+    ("get_balance_sheet",   "stock_balance_sheet_by_report_em",       "No balance sheet data"),
+    ("get_cashflow",        "stock_cash_flow_sheet_by_report_em",     "No cash flow data"),
+    ("get_income_statement","stock_profit_sheet_by_report_em",        "No income statement data"),
+])
+def test_financial_methods_list_or_empty_return_resilience(
+    bad_return, method_name, ak_attr, expected_fragment
+):
+    """Each financial method must return a string and never raise when akshare
+    returns [], None, Series, or empty DataFrame."""
+    ak = MagicMock()
+    setattr(ak, ak_attr, MagicMock(return_value=bad_return))
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        func = getattr(_vendor_mod, method_name)
+        result = func("600519")
+
+    assert isinstance(result, str), (
+        f"{method_name} with bad_return={type(bad_return).__name__} "
+        f"returned {type(result)}, expected str"
+    )
+    assert len(result) > 0

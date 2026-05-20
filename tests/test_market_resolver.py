@@ -20,10 +20,11 @@ def test_resolve_market(tk, exp):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
-@pytest.mark.parametrize("tk", ["LTC", "ADA", "TRX", "DOT", "BAT", "XLM"])
+@pytest.mark.parametrize("tk", ["LTC", "ADA", "TRX", "DOT", "BAT", "XLM", "BCH"])
 def test_no_collision_with_equity_tickers(tk):
     """Tickers removed from BARE_CRYPTO_BASES must now resolve to US (not CRYPTO).
-    Users wanting these as crypto should use the suffix form (LTC-USD etc.).
+    Users wanting these as crypto should use the suffix form (LTC-USD, BCH-USD etc.).
+    BCH = Banco de Chile (NYSE), added in audit-v2 trim.
     """
     assert resolve_market(tk) == Market.US, (
         f"Expected {tk!r} to resolve to Market.US (removed from BARE_CRYPTO_BASES), "
@@ -42,8 +43,8 @@ def test_suffix_form_still_resolves_to_crypto(tk):
 
 @pytest.mark.unit
 def test_bare_crypto_bases_is_unambiguous_subset():
-    """BARE_CRYPTO_BASES must be exactly the 8 no-collision symbols."""
-    expected = frozenset({"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "BCH", "AVAX"})
+    """BARE_CRYPTO_BASES must be exactly the 7 no-collision symbols (BCH removed in audit-v2)."""
+    expected = frozenset({"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX"})
     assert BARE_CRYPTO_BASES == expected, (
         f"BARE_CRYPTO_BASES mismatch.\n"
         f"Expected: {sorted(expected)}\n"
@@ -72,6 +73,7 @@ def test_bare_crypto_bases_is_unambiguous_subset():
     ("LTC",       "LTC"),        # removed from BARE_CRYPTO_BASES — unchanged
     ("ADA",       "ADA"),        # removed from BARE_CRYPTO_BASES — unchanged
     ("TRX",       "TRX"),        # removed from BARE_CRYPTO_BASES — unchanged
+    ("BCH",       "BCH"),        # removed in audit-v2 (Banco de Chile collision) — unchanged
 ])
 def test_to_yfinance_symbol_rewrites_bare_crypto(raw, expected):
     assert to_yfinance_symbol(raw) == expected, (

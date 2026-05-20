@@ -550,3 +550,27 @@ class TestFailSafe:
                     assert isinstance(result, str)
                 except Exception as exc:
                     pytest.fail(f"get_news raised for ticker={ticker!r}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: list-return resilience for get_news
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_return", [[], None, pd.Series([1, 2, 3]), pd.DataFrame()])
+def test_get_news_list_or_empty_return_resilience(bad_return):
+    """When stock_news_em returns [], None, Series, or empty df, get_news must
+    return an error/no-data string and never raise AttributeError.
+    """
+    import tradingagents.dataflows.akshare_china as _mod
+
+    ak = MagicMock()
+    ak.stock_news_em.return_value = bad_return
+
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result = _mod.get_news("600519", "2024-01-01", "2024-01-31")
+
+    assert isinstance(result, str), (
+        f"Expected str, got {type(result)} for bad_return={type(bad_return).__name__}"
+    )
+    assert len(result) > 0

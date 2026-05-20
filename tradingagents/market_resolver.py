@@ -21,10 +21,11 @@ _CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
 #   ADA  → ambiguous / historical equity conflicts
 #   TRX  → TRX Gold (NYSE American)
 #   DOT  → ambiguous / historical equity conflicts
+#   BCH  → Banco de Chile (NYSE: BCH); audit-v2 trim — use BCH-USD for Bitcoin Cash
 # Users who specifically want those as crypto should use the suffix form
-# (e.g. LTC-USD, TRX-USDT) which is always unambiguous.
+# (e.g. BCH-USD, LTC-USD, TRX-USDT) which is always unambiguous.
 BARE_CRYPTO_BASES = frozenset({
-    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "BCH", "AVAX",
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX",
 })
 
 # A-share: 6-digit code, optionally suffixed with .SH / .SS / .SZ / .BJ

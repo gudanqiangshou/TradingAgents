@@ -679,3 +679,96 @@ def test_a_share_get_stock_data_bad_schema_returns_error_string():
     # (bad schema → rename is no-op → sort_values("Date") KeyError is now caught)
     # The function must not raise
     assert len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: list-return resilience (ohlcv + indicators)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_return", [[], None, pd.Series([1, 2, 3]), pd.DataFrame()])
+def test_get_stock_data_list_or_empty_return_resilience(bad_return):
+    """When akshare returns [], None, Series, or empty df, get_stock_data must
+    return an error/no-data string and never raise AttributeError.
+    """
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_a_hist.return_value = bad_return
+    fake_ak.stock_zh_a_daily.return_value = bad_return
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = _vendor_mod.get_stock_data("600519", "2026-01-05", "2026-01-09")
+
+    assert isinstance(result, str), (
+        f"Expected str, got {type(result)} for bad_return={type(bad_return).__name__}"
+    )
+    assert len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: look_back_days coercion tests
+# ---------------------------------------------------------------------------
+
+class TestGetIndicatorsCoerce:
+    """Tests for look_back_days type coercion in get_indicators."""
+
+    @pytest.mark.unit
+    def test_string_look_back_days_returns_error_string(self):
+        """look_back_days='30' (string) must return error string, not raise TypeError."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_indicators("600519", "close_50_sma", "2024-06-30", "30")
+
+        # Must return an error string (string "30" is coercible to int, so this
+        # should actually succeed — but the test verifies no TypeError leaks).
+        # Since "30" IS coercible to int(30), expect a normal result or no raise.
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        # Must not contain "TypeError" (which would mean the coerce failed and leaked)
+        assert "TypeError" not in result, (
+            "TypeError leaked into result string — coerce not working"
+        )
+
+    @pytest.mark.unit
+    def test_non_coercible_look_back_days_returns_error_string(self):
+        """look_back_days='thirty' (non-coercible string) must return error string, not raise."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_indicators("600519", "close_50_sma", "2024-06-30", "thirty")
+
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.lower().startswith("error:"), (
+            f"Expected error string for non-coercible look_back_days, got: {result!r}"
+        )
+        assert "look_back_days" in result
+
+    @pytest.mark.unit
+    def test_negative_look_back_days_returns_error_string(self):
+        """look_back_days=-5 must return error string, not raise."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_indicators("600519", "close_50_sma", "2024-06-30", -5)
+
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.lower().startswith("error:"), (
+            f"Expected error string for negative look_back_days, got: {result!r}"
+        )
+        assert "non-negative" in result

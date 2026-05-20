@@ -11,7 +11,9 @@ concurrent callers never trigger more than one pip invocation for the same
 package.
 
 Fail-safe: all subprocess/import errors are translated to DependencyUnavailable;
-no other exception type escapes this module.
+no other exception type escapes this module.  The fast-path (before the lock)
+always translates unexpected exceptions to DependencyUnavailable while logging
+the underlying type at WARNING level so operators can debug real import bugs.
 
 Stdlib-only: importlib, subprocess, sys, threading, time, logging, types.
 """
@@ -110,7 +112,18 @@ def ensure(
     try:
         return importlib.import_module(import_name)
     except ImportError:
-        pass
+        pass  # expected — module not yet installed; fall through to install
+    except Exception as e:
+        # Unexpected exception (RuntimeError, AttributeError, etc.) at import time.
+        # Translate to DependencyUnavailable so callers get a consistent exception
+        # type.  Log at WARNING so operators can see the real underlying error.
+        logger.warning(
+            "importing %s in fast-path raised %s; treating as unavailable",
+            import_name, type(e).__name__,
+        )
+        raise DependencyUnavailable(
+            f"{import_name}: import failed at fast-path ({type(e).__name__})"
+        ) from e
 
     # --- Slow path: acquire lock, double-check, then install ---
     with _install_lock:

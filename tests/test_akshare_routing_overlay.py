@@ -309,3 +309,159 @@ def test_overlay_is_idempotent():
         assert cfg_a["tool_vendors"] == cfg_b["tool_vendors"], (
             f"tool_vendors not idempotent for ticker={ticker!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix 7 — Production chain tests (real set_config → route_to_vendor flow)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_pollution_cleared_in_global_config_after_us_overlay(monkeypatch):
+    """HK → US: global _config["tool_vendors"] must be empty after US overlay + set_config.
+
+    This is the EXACT production failure scenario from Critical 1.
+    Uses the real set_config → get_config chain, NOT a direct _config monkeypatch.
+    """
+    import copy
+    import tradingagents.default_config as dc
+    import tradingagents.dataflows.config as cfg_mod
+    from tradingagents.dataflows.config import set_config, get_config
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+    from tradingagents.dataflows import interface
+
+    # Reset global _config to clean default
+    monkeypatch.setattr(cfg_mod, "_config", copy.deepcopy(dc.DEFAULT_CONFIG))
+
+    # Step 1: HK run — set akshare routing
+    cfg_hk = copy.deepcopy(dc.DEFAULT_CONFIG)
+    apply_china_vendor_overlay(cfg_hk, "0700.HK")
+    set_config(cfg_hk)
+
+    assert get_config()["tool_vendors"] == {
+        "get_stock_data": "akshare",
+        "get_fundamentals": "akshare",
+    }, "HK overlay + set_config must set tool_vendors to akshare keys"
+
+    # Step 2: US run — must clear akshare routing
+    cfg_us = copy.deepcopy(dc.DEFAULT_CONFIG)
+    apply_china_vendor_overlay(cfg_us, "AAPL")
+    set_config(cfg_us)
+
+    tool_vendors_after = get_config()["tool_vendors"]
+    assert tool_vendors_after == {}, (
+        f"Expected empty tool_vendors after US overlay + set_config, "
+        f"got: {tool_vendors_after}"
+    )
+
+    # Step 3: Verify route_to_vendor does NOT dispatch to akshare for AAPL
+    SENTINEL = "akshare_was_called"
+
+    def akshare_stub(symbol, start_date, end_date):
+        return SENTINEL
+
+    monkeypatch.setitem(
+        interface.VENDOR_METHODS["get_stock_data"],
+        "akshare",
+        akshare_stub,
+    )
+
+    yf_result = "yfinance_was_called"
+
+    def yfinance_stub(symbol, start_date, end_date):
+        return yf_result
+
+    monkeypatch.setitem(
+        interface.VENDOR_METHODS["get_stock_data"],
+        "yfinance",
+        yfinance_stub,
+    )
+
+    result = interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-05", "2026-01-09")
+    assert result != SENTINEL, (
+        "route_to_vendor dispatched to akshare for AAPL after US overlay — "
+        "global _config still polluted!"
+    )
+    assert result == yf_result, (
+        f"Expected yfinance result for AAPL, got: {result!r}"
+    )
+
+
+@pytest.mark.unit
+def test_pollution_cleared_a_share_to_hk(monkeypatch):
+    """A-share → HK: global _config data_vendors must be reset to yfinance after HK overlay.
+
+    After an A-share run (data_vendors all akshare), an HK run must clear the
+    data_vendor akshare keys (HK only touches tool_vendors).
+    """
+    import copy
+    import tradingagents.default_config as dc
+    import tradingagents.dataflows.config as cfg_mod
+    from tradingagents.dataflows.config import set_config, get_config
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+
+    # Reset global _config to clean default
+    monkeypatch.setattr(cfg_mod, "_config", copy.deepcopy(dc.DEFAULT_CONFIG))
+
+    # Step 1: A-share run
+    cfg_a = copy.deepcopy(dc.DEFAULT_CONFIG)
+    apply_china_vendor_overlay(cfg_a, "600519")
+    set_config(cfg_a)
+
+    assert get_config()["data_vendors"]["core_stock_apis"] == "akshare", (
+        "A-share overlay + set_config must set core_stock_apis to akshare"
+    )
+
+    # Step 2: HK run — must reset data_vendors to yfinance
+    cfg_hk = copy.deepcopy(dc.DEFAULT_CONFIG)
+    apply_china_vendor_overlay(cfg_hk, "0700.HK")
+    set_config(cfg_hk)
+
+    global_cfg = get_config()
+    assert global_cfg["data_vendors"]["core_stock_apis"] == "yfinance", (
+        "After HK overlay, data_vendors.core_stock_apis must be yfinance; "
+        "A-share akshare pollution survived"
+    )
+    assert global_cfg["data_vendors"]["fundamental_data"] == "yfinance"
+    assert global_cfg["data_vendors"]["news_data"] == "yfinance"
+    assert global_cfg["data_vendors"]["technical_indicators"] == "yfinance"
+    # HK tool_vendors must be set
+    assert global_cfg["tool_vendors"]["get_stock_data"] == "akshare"
+    assert global_cfg["tool_vendors"]["get_fundamentals"] == "akshare"
+
+
+@pytest.mark.unit
+def test_overlay_preserves_caller_custom_non_akshare_entries(monkeypatch):
+    """Overlay must not wipe caller's custom non-akshare entries (Important 6).
+
+    Caller pre-sets tool_vendors={"get_news": "alpha_vantage"} and
+    data_vendors={"core_stock_apis": "alpha_vantage", ...}.
+    After apply_china_vendor_overlay for a US ticker (no-op for akshare),
+    the caller's customizations must survive.
+    """
+    import copy
+    import tradingagents.default_config as dc
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+
+    cfg = copy.deepcopy(dc.DEFAULT_CONFIG)
+    cfg["tool_vendors"] = {"get_news": "alpha_vantage"}
+    cfg["data_vendors"] = dict(dc.DEFAULT_CONFIG["data_vendors"])
+    cfg["data_vendors"]["core_stock_apis"] = "alpha_vantage"
+    cfg["data_vendors"]["fundamental_data"] = "alpha_vantage"
+
+    # US ticker — overlay should only clear stale akshare keys (none here)
+    # and must preserve caller's custom settings
+    apply_china_vendor_overlay(cfg, "AAPL")
+
+    # Caller's customizations must survive
+    assert cfg["tool_vendors"].get("get_news") == "alpha_vantage", (
+        "Overlay wiped caller's custom tool_vendors[get_news]"
+    )
+    assert cfg["data_vendors"]["core_stock_apis"] == "alpha_vantage", (
+        "Overlay wiped caller's custom data_vendors[core_stock_apis]"
+    )
+    assert cfg["data_vendors"]["fundamental_data"] == "alpha_vantage", (
+        "Overlay wiped caller's custom data_vendors[fundamental_data]"
+    )
+    # Non-custom keys must remain at yfinance defaults
+    assert cfg["data_vendors"]["news_data"] == "yfinance"
+    assert cfg["data_vendors"]["technical_indicators"] == "yfinance"

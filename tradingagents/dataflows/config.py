@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import tradingagents.default_config as default_config
 
@@ -29,6 +29,24 @@ def set_config(config: Dict):
             _config[key].update(value)
         else:
             _config[key] = value
+
+
+def replace_section(key: str, value: Any) -> None:
+    """Fully replace a top-level section in the global ``_config``.
+
+    Unlike :func:`set_config`, which *merges* dict-valued keys one level deep,
+    this function deep-copies *value* and assigns it directly to
+    ``_config[key]``, completely replacing whatever was there.
+
+    Use sparingly — intended for callers that need REPLACE semantics on nested
+    dicts (e.g. per-run routing overlays such as
+    :func:`tradingagents.dataflows.akshare_china.apply_china_vendor_overlay`)
+    where the full desired state must be written through to the global config
+    to defeat :func:`set_config`'s merge-only behaviour.
+    """
+    global _config
+    initialize_config()
+    _config[key] = deepcopy(value)
 
 
 def get_config() -> Dict:

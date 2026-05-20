@@ -589,3 +589,38 @@ def test_os_error_during_install_translates_to_dependency_unavailable():
 
         with pytest.raises(mod.DependencyUnavailable):
             mod.ensure("mypkg")
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: fast-path non-ImportError translates to DependencyUnavailable
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_fast_path_non_import_error_translates_to_dependency_unavailable():
+    """If import raises RuntimeError (not ImportError) in the fast-path,
+    ensure() must raise DependencyUnavailable, not RuntimeError.
+    subprocess.run must NOT be called (we never reach the install step).
+    """
+    mod = _import_bootstrap()
+
+    mock_importlib = MagicMock(wraps=_real_importlib)
+    # Fast path: import raises RuntimeError (not ImportError)
+    mock_importlib.import_module.side_effect = RuntimeError("boom — bad module")
+
+    mock_subprocess = MagicMock()
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
+
+    with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
+
+        with pytest.raises(mod.DependencyUnavailable) as exc_info:
+            mod.ensure("akshare")
+
+    # Must raise DependencyUnavailable (not RuntimeError)
+    assert isinstance(exc_info.value, mod.DependencyUnavailable), (
+        f"Expected DependencyUnavailable, got {type(exc_info.value)}"
+    )
+    # subprocess.run must NOT have been called — we never reached install
+    mock_subprocess.run.assert_not_called(), (
+        "subprocess.run was called — fast-path should have raised before install"
+    )

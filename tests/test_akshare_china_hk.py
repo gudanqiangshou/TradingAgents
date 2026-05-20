@@ -504,3 +504,43 @@ class TestGetFundamentalsHK:
         assert isinstance(result, str)
         assert "on or before" in result
         assert "2024-01-01" in result
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: list-return resilience for HK methods
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_return", [[], None, pd.Series([1, 2, 3]), pd.DataFrame()])
+def test_hk_get_stock_data_list_or_empty_return_resilience(bad_return):
+    """When stock_hk_daily returns [], None, Series, or empty df, get_stock_data
+    must return an error/no-data string and never raise AttributeError.
+    """
+    ak = MagicMock()
+    ak.stock_hk_daily.return_value = bad_return
+
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result = _vendor_mod.get_stock_data("00700.HK", "2024-01-01", "2024-01-10")
+
+    assert isinstance(result, str), (
+        f"Expected str, got {type(result)} for bad_return={type(bad_return).__name__}"
+    )
+    assert len(result) > 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_return", [[], None, pd.Series([1, 2, 3]), pd.DataFrame()])
+def test_hk_get_fundamentals_list_or_empty_return_resilience(bad_return):
+    """When stock_financial_hk_analysis_indicator_em returns [], None, Series, or
+    empty df, get_fundamentals must return a string and never raise AttributeError.
+    """
+    ak = MagicMock()
+    ak.stock_financial_hk_analysis_indicator_em.return_value = bad_return
+
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result = _vendor_mod.get_fundamentals("00700.HK")
+
+    assert isinstance(result, str), (
+        f"Expected str, got {type(result)} for bad_return={type(bad_return).__name__}"
+    )
+    assert len(result) > 0
