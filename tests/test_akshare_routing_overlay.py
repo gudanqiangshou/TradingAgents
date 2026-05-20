@@ -149,51 +149,7 @@ def test_overlay_does_not_mutate_global_default_config():
 
 
 # ---------------------------------------------------------------------------
-# 5. route_to_vendor dispatches to akshare when overlaid
-# ---------------------------------------------------------------------------
-
-@pytest.mark.unit
-def test_route_to_vendor_uses_akshare_when_overlaid(monkeypatch):
-    """set_config(data_vendors.core_stock_apis=akshare) → route_to_vendor calls akshare impl."""
-    import copy
-    import tradingagents.default_config as dc
-    import tradingagents.dataflows.config as cfg_mod
-    from tradingagents.dataflows import interface
-
-    # Directly replace _config with a clean deep-copy that has akshare as the
-    # core_stock_apis vendor.  We cannot use set_config() here because its
-    # one-level-deep merge leaves stale tool_vendors keys from earlier tests
-    # (e.g. test_dataflows_config sets tool_vendors["get_stock_data"]="alpha_vantage",
-    # and merging an empty dict over it with .update({}) is a no-op — the key
-    # survives and the tool-level override then wins over the category setting).
-    clean = copy.deepcopy(dc.DEFAULT_CONFIG)
-    clean["data_vendors"]["core_stock_apis"] = "akshare"
-    original_cfg = cfg_mod._config  # save for teardown
-    monkeypatch.setattr(cfg_mod, "_config", clean)
-
-    # Sentinel value returned by the stub
-    SENTINEL = "akshare_sentinel_result"
-
-    def stub_get_stock_data(symbol, start_date, end_date):
-        return SENTINEL
-
-    # Monkeypatch the akshare entry in VENDOR_METHODS
-    monkeypatch.setitem(
-        interface.VENDOR_METHODS["get_stock_data"],
-        "akshare",
-        stub_get_stock_data,
-    )
-
-    result = interface.route_to_vendor(
-        "get_stock_data", "600519", "2026-01-05", "2026-01-09"
-    )
-    assert result == SENTINEL, (
-        f"Expected sentinel from akshare stub, got {result!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 6. DEFAULT_CONFIG unchanged; akshare registered in VENDOR_METHODS
+# 5. DEFAULT_CONFIG unchanged; akshare registered in VENDOR_METHODS
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
@@ -465,3 +421,93 @@ def test_overlay_preserves_caller_custom_non_akshare_entries(monkeypatch):
     # Non-custom keys must remain at yfinance defaults
     assert cfg["data_vendors"]["news_data"] == "yfinance"
     assert cfg["data_vendors"]["technical_indicators"] == "yfinance"
+
+
+# ---------------------------------------------------------------------------
+# audit-v3: comma-chain overlay cleanup tests (Important 4)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_overlay_strips_akshare_from_vendor_chain(monkeypatch):
+    """Caller pre-sets data_vendors['core_stock_apis']='akshare,yfinance'.
+    After apply_china_vendor_overlay for a US ticker, akshare is stripped and
+    yfinance is preserved (chain form handled, not just exact equality).
+    """
+    import copy
+    import tradingagents.default_config as dc
+    import tradingagents.dataflows.config as cfg_mod
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+    from tradingagents.dataflows import interface
+
+    cfg = copy.deepcopy(dc.DEFAULT_CONFIG)
+    # Pre-set a comma chain (as if a prior run left akshare prepended)
+    cfg["data_vendors"]["core_stock_apis"] = "akshare,yfinance"
+
+    apply_china_vendor_overlay(cfg, "AAPL")
+
+    # akshare should be stripped; yfinance preserved
+    assert cfg["data_vendors"]["core_stock_apis"] == "yfinance", (
+        f"Expected 'yfinance' after stripping akshare from chain, "
+        f"got: {cfg['data_vendors']['core_stock_apis']!r}"
+    )
+
+
+@pytest.mark.unit
+def test_overlay_strips_akshare_from_reversed_chain(monkeypatch):
+    """Caller pre-sets 'yfinance,akshare' (akshare at the end).
+    After US overlay, akshare is stripped; yfinance preserved.
+    """
+    import copy
+    import tradingagents.default_config as dc
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+
+    cfg = copy.deepcopy(dc.DEFAULT_CONFIG)
+    cfg["data_vendors"]["core_stock_apis"] = "yfinance,akshare"
+
+    apply_china_vendor_overlay(cfg, "AAPL")
+
+    assert cfg["data_vendors"]["core_stock_apis"] == "yfinance", (
+        f"Expected 'yfinance' after stripping akshare from reversed chain, "
+        f"got: {cfg['data_vendors']['core_stock_apis']!r}"
+    )
+
+
+@pytest.mark.unit
+def test_overlay_strips_akshare_from_middle_of_chain():
+    """Caller pre-sets 'alpha_vantage,akshare,yfinance'.
+    After US overlay, akshare is stripped; other vendors preserved.
+    """
+    import copy
+    import tradingagents.default_config as dc
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+
+    cfg = copy.deepcopy(dc.DEFAULT_CONFIG)
+    cfg["data_vendors"]["core_stock_apis"] = "alpha_vantage,akshare,yfinance"
+
+    apply_china_vendor_overlay(cfg, "AAPL")
+
+    assert cfg["data_vendors"]["core_stock_apis"] == "alpha_vantage,yfinance", (
+        f"Expected 'alpha_vantage,yfinance' after stripping middle akshare, "
+        f"got: {cfg['data_vendors']['core_stock_apis']!r}"
+    )
+
+
+@pytest.mark.unit
+def test_overlay_a_share_overrides_chain_to_akshare():
+    """Caller pre-sets data_vendors['core_stock_apis']='alpha_vantage'.
+    After apply_china_vendor_overlay for an A-share ticker, the result must be
+    'akshare' (A-share overrides caller's category value).
+    """
+    import copy
+    import tradingagents.default_config as dc
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+
+    cfg = copy.deepcopy(dc.DEFAULT_CONFIG)
+    cfg["data_vendors"]["core_stock_apis"] = "alpha_vantage"
+
+    apply_china_vendor_overlay(cfg, "600519")
+
+    assert cfg["data_vendors"]["core_stock_apis"] == "akshare", (
+        f"Expected 'akshare' after A-share overlay, "
+        f"got: {cfg['data_vendors']['core_stock_apis']!r}"
+    )

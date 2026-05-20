@@ -574,3 +574,45 @@ def test_get_news_list_or_empty_return_resilience(bad_return):
         f"Expected str, got {type(result)} for bad_return={type(bad_return).__name__}"
     )
     assert len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# audit-v3: scalar return tests (Important 5)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_get_news_scalar_return_returns_error_string():
+    """stock_news_em returns a scalar int (123) -> error string, no TypeError."""
+    import tradingagents.dataflows.akshare_china as _mod
+
+    ak = MagicMock()
+    ak.stock_news_em.return_value = 123  # scalar int
+
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result = _mod.get_news("600519", "2024-01-01", "2024-01-31")
+
+    assert isinstance(result, str), f"Expected str, got {type(result)}"
+    assert len(result) > 0
+    # Must be an error string (scalar is not valid)
+    assert result.lower().startswith("error:") or "no news" in result.lower(), (
+        f"Expected error or no-news string for scalar return, got: {result!r}"
+    )
+
+
+@pytest.mark.unit
+def test_get_news_string_return_returns_error_string():
+    """stock_news_em returns a raw string 'oops' -> error string, no AttributeError."""
+    import tradingagents.dataflows.akshare_china as _mod
+
+    ak = MagicMock()
+    ak.stock_news_em.return_value = "oops"  # string (not DataFrame)
+
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result = _mod.get_news("600519", "2024-01-01", "2024-01-31")
+
+    assert isinstance(result, str), f"Expected str, got {type(result)}"
+    assert len(result) > 0
+    # Must be an error string (raw string is not a valid DataFrame)
+    assert result.lower().startswith("error:") or "no news" in result.lower(), (
+        f"Expected error or no-news string for string return, got: {result!r}"
+    )

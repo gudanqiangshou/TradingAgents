@@ -624,3 +624,44 @@ def test_fast_path_non_import_error_translates_to_dependency_unavailable():
     mock_subprocess.run.assert_not_called(), (
         "subprocess.run was called — fast-path should have raised before install"
     )
+
+
+# ---------------------------------------------------------------------------
+# audit-v3: lock-inner double-check non-ImportError translates to
+# DependencyUnavailable (Critical 1 — third symmetric path)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_lock_inner_non_import_error_translates_to_dependency_unavailable():
+    """Lock-inner double-check: first import raises ImportError (expected; forces
+    lock acquisition), then the second import attempt (inside the lock) raises
+    RuntimeError.  ensure() must:
+    - raise DependencyUnavailable (NOT RuntimeError)
+    - NOT call subprocess.run (we exit before reaching the install step)
+    """
+    mod = _import_bootstrap()
+
+    call_count = {"n": 0}
+
+    def side_effect_import(name, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Fast path: normal ImportError (module not installed yet)
+            raise ImportError(f"No module named '{name}'")
+        # Lock-inner retry: unexpected non-ImportError (e.g. broken sys.modules entry)
+        raise RuntimeError("inner boom")
+
+    mock_importlib = MagicMock(wraps=_real_importlib)
+    mock_importlib.import_module.side_effect = side_effect_import
+
+    mock_subprocess = MagicMock()
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
+
+    with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
+
+        with pytest.raises(mod.DependencyUnavailable):
+            mod.ensure("brokenpkg")
+
+    # subprocess.run must NOT have been called — we exited before install
+    mock_subprocess.run.assert_not_called()

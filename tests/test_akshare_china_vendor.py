@@ -772,3 +772,103 @@ class TestGetIndicatorsCoerce:
             f"Expected error string for negative look_back_days, got: {result!r}"
         )
         assert "non-negative" in result
+
+
+# ---------------------------------------------------------------------------
+# audit-v3: Additional type-guard tests (Important 5)
+# ---------------------------------------------------------------------------
+
+class TestGetIndicatorsTypeGuards:
+    """audit-v3: NaN/inf/bool look_back_days must return error strings, not raise."""
+
+    @pytest.mark.unit
+    def test_get_indicators_inf_look_back_returns_error_string(self):
+        """look_back_days=float('inf') must return error string, not OverflowError."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_indicators("600519", "close_50_sma", "2024-06-30", float("inf"))
+
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.lower().startswith("error:"), (
+            f"Expected error string for inf look_back_days, got: {result!r}"
+        )
+
+    @pytest.mark.unit
+    def test_get_indicators_nan_look_back_returns_error_string(self):
+        """look_back_days=float('nan') must return error string, not raise."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_indicators("600519", "close_50_sma", "2024-06-30", float("nan"))
+
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.lower().startswith("error:"), (
+            f"Expected error string for nan look_back_days, got: {result!r}"
+        )
+
+    @pytest.mark.unit
+    def test_get_indicators_bool_look_back_treated_as_invalid(self):
+        """look_back_days=True must return error string (bool not silently coerced to int 1)."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_indicators("600519", "close_50_sma", "2024-06-30", True)
+
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.lower().startswith("error:"), (
+            f"Expected error string for bool look_back_days, got: {result!r}"
+        )
+
+
+class TestGetStockDataTypeGuards:
+    """audit-v3: None/datetime start_date must return error strings, not raise."""
+
+    @pytest.mark.unit
+    def test_get_stock_data_none_start_date_returns_error_string(self):
+        """start_date=None must return error string, not raise TypeError."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_stock_data("600519", None, "2024-01-02")
+
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.lower().startswith("error:"), (
+            f"Expected error string for None start_date, got: {result!r}"
+        )
+        ensure_mock.assert_not_called()
+
+    @pytest.mark.unit
+    def test_get_stock_data_datetime_start_date_returns_error_string(self):
+        """start_date=datetime object must return error string, not raise."""
+        import tradingagents.dataflows.akshare_china as _mod
+        from datetime import datetime
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_stock_data("600519", datetime(2024, 1, 1), "2024-01-02")
+
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.lower().startswith("error:"), (
+            f"Expected error string for datetime start_date, got: {result!r}"
+        )
+        ensure_mock.assert_not_called()

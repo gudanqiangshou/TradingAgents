@@ -11,9 +11,11 @@ concurrent callers never trigger more than one pip invocation for the same
 package.
 
 Fail-safe: all subprocess/import errors are translated to DependencyUnavailable;
-no other exception type escapes this module.  The fast-path (before the lock)
-always translates unexpected exceptions to DependencyUnavailable while logging
-the underlying type at WARNING level so operators can debug real import bugs.
+no other exception type escapes this module.  All THREE import paths
+(fast-path before the lock, lock-inner double-check retry, and post-install
+retry) translate any non-ImportError exception to DependencyUnavailable,
+log the underlying type at WARNING/ERROR level so operators can debug real
+import bugs, and populate _failed_installs so the module is never retried.
 
 Stdlib-only: importlib, subprocess, sys, threading, time, logging, types.
 """
@@ -131,7 +133,16 @@ def ensure(
         try:
             return importlib.import_module(import_name)
         except ImportError:
-            pass
+            pass  # expected; need to install
+        except Exception as e:
+            logger.warning(
+                "importing %s in lock-inner retry raised %s; treating as unavailable",
+                import_name, type(e).__name__,
+            )
+            _failed_installs.add(import_name)
+            raise DependencyUnavailable(
+                f"{import_name}: import failed at lock-inner retry ({type(e).__name__})"
+            ) from e
 
         # Single-flight: if we already tried (and failed), bail immediately.
         if import_name in _failed_installs:

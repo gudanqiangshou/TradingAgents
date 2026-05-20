@@ -100,6 +100,35 @@ _INDICATOR_CATALOG: dict[str, str] = {
 }
 
 
+def _validate_date_str(value, name: str) -> "str | None":
+    """Return None if `value` looks like a YYYY-MM-DD string; otherwise an
+    informative error message string (the vendor's never-raises convention)."""
+    if not isinstance(value, str) or not value.strip():
+        return f"Error: {name} must be a 'yyyy-mm-dd' string, got {type(value).__name__}: {value!r}"
+    # Cheap shape check — full parse already done later if shape matches.
+    if len(value.strip()) < 8 or len(value.strip()) > 12:
+        return f"Error: {name}={value!r} does not look like a date"
+    return None
+
+
+def _coerce_positive_int(value, name: str) -> "tuple[int | None, str | None]":
+    """Coerce to a non-negative finite int. Returns (value, None) on success or
+    (None, error_string) on failure. Rejects bool, NaN, inf, negatives."""
+    try:
+        if isinstance(value, bool):
+            return None, f"Error: {name} must be int, got bool: {value!r}"
+        # Reject inf/nan before int() because int(float('inf')) raises OverflowError
+        import math
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None, f"Error: {name} must be a finite number, got {value!r}"
+        coerced = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, f"Error: {name} must be coercible to int, got {type(value).__name__}: {value!r}"
+    if coerced < 0:
+        return None, f"Error: {name} must be non-negative, got {coerced}"
+    return coerced, None
+
+
 def _sina_prefix(code: str) -> str:
     """Return the Sina/akshare exchange prefix for a bare 6-digit A-share code.
 
@@ -257,6 +286,16 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     kind = "A-share" if market == Market.A_SHARE else "HK"
 
     # ------------------------------------------------------------------
+    # Validate date parameters at entry (never-raises contract)
+    # ------------------------------------------------------------------
+    err = _validate_date_str(start_date, "start_date")
+    if err:
+        return err
+    err = _validate_date_str(end_date, "end_date")
+    if err:
+        return err
+
+    # ------------------------------------------------------------------
     # Normalise symbol
     # ------------------------------------------------------------------
     if market == Market.A_SHARE:
@@ -409,6 +448,12 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
         )
 
     kind = "A-share" if market == Market.A_SHARE else "HK"
+
+    # Validate curr_date at entry if provided
+    if curr_date is not None:
+        date_err = _validate_date_str(curr_date, "curr_date")
+        if date_err:
+            return date_err
 
     if market == Market.A_SHARE:
         code = ticker.strip().upper().split(".")[0]
@@ -567,6 +612,12 @@ def _financial_statement(
             f"'{ticker}' was classified as non-A-share. "
             "Please use the appropriate vendor for this symbol."
         )
+
+    # Validate curr_date at entry if provided
+    if curr_date is not None:
+        date_err = _validate_date_str(curr_date, "curr_date")
+        if date_err:
+            return date_err
 
     code = ticker.strip().upper().split(".")[0]
 
@@ -731,6 +782,16 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
         )
 
     # ------------------------------------------------------------------
+    # Validate date parameters at entry (never-raises contract)
+    # ------------------------------------------------------------------
+    err = _validate_date_str(start_date, "start_date")
+    if err:
+        return err
+    err = _validate_date_str(end_date, "end_date")
+    if err:
+        return err
+
+    # ------------------------------------------------------------------
     # Normalise symbol: strip whitespace, upper-case, drop exchange suffix,
     # then zero-pad to 6 digits (A-share codes are always 6 digits).
     # ------------------------------------------------------------------
@@ -753,13 +814,22 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
         return f"Error: failed to fetch A-share news for {ticker}: {exc}"
 
     # ------------------------------------------------------------------
-    # Empty result — also guard against endpoint returning a list (not DataFrame)
+    # Empty result — also guard against endpoint returning a non-DataFrame
+    # (scalar, list, etc.) via _df_is_empty which covers None/non-DataFrame.
     # ------------------------------------------------------------------
     if df is None:
         return f"No news found for {ticker}"
-    # Some akshare versions return [] (a list) instead of an empty DataFrame
+    # Some akshare versions return [] (a list) instead of an empty DataFrame;
+    # scalars (int, str) must also be caught without calling len() which raises
+    # on ints.  Route ALL non-DataFrame through _df_is_empty first.
     if not isinstance(df, pd.DataFrame):
-        if len(df) == 0:
+        # Try length check only for sized types (list, tuple, etc.)
+        try:
+            is_empty_sized = len(df) == 0
+        except TypeError:
+            # Scalar types (int, float, etc.) have no len() — treat as error
+            return f"Error: unexpected A-share news response for {ticker}: got {type(df).__name__}, expected DataFrame"
+        if is_empty_sized:
             return f"No news found for {ticker}"
         return f"Error: unexpected A-share news response for {ticker}: got {type(df).__name__}, expected DataFrame"
     # Use helper (consistent with other empty-check sites)
@@ -900,25 +970,22 @@ def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days: 
             "Please use the appropriate vendor for this symbol."
         )
 
-    # 3. Date parse curr_date — if invalid return error string
+    # 3. Validate curr_date — if invalid return error string
+    date_err = _validate_date_str(curr_date, "curr_date")
+    if date_err:
+        return date_err
     try:
-        curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+        curr_date_dt = datetime.strptime(curr_date.strip(), "%Y-%m-%d")
     except ValueError:
         return (
             f"Error: invalid date format for {curr_date!r}; expected yyyy-mm-dd"
         )
 
     # 3b. Coerce look_back_days to int — LLM agents may pass a string (e.g. "30")
-    try:
-        look_back_days = int(look_back_days)
-    except (TypeError, ValueError):
-        return (
-            f"Error: look_back_days must be coercible to int, got {look_back_days!r}"
-        )
-    if look_back_days < 0:
-        return (
-            f"Error: look_back_days must be non-negative, got {look_back_days}"
-        )
+    # Also rejects bool, NaN, inf, overflow via _coerce_positive_int.
+    look_back_days, coerce_err = _coerce_positive_int(look_back_days, "look_back_days")
+    if coerce_err:
+        return coerce_err
 
     # 4. Compute fetch window (generous: 400 extra days for 200-SMA + buffer)
     fetch_start_dt = curr_date_dt - timedelta(days=look_back_days + 400)
@@ -998,6 +1065,21 @@ def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days: 
     return result_str
 
 
+def _strip_akshare_from_chain(value: str, default: str) -> str:
+    """Remove 'akshare' tokens from a comma-separated vendor chain.
+
+    Returns the cleaned chain or `default` if nothing remains after stripping.
+    Handles exact-match (``"akshare"``), prefix (``"akshare,yfinance"``),
+    suffix (``"yfinance,akshare"``), and middle forms
+    (``"alpha_vantage,akshare,yfinance"``).
+    """
+    if not isinstance(value, str):
+        return value
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    cleaned = [p for p in parts if p != "akshare"]
+    return ",".join(cleaned) if cleaned else default
+
+
 def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     """Route A-share or HK tickers to the 'akshare' vendor for THIS run only.
 
@@ -1056,13 +1138,24 @@ def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     data_vendors = dict(config.get("data_vendors") or {})
     tool_vendors = dict(config.get("tool_vendors") or {})
 
-    # Step 1: clear any stale akshare entries in the owned key sets
-    for key in _AKSHARE_DATA_VENDOR_KEYS:
-        if data_vendors.get(key) == "akshare":
-            data_vendors[key] = DEFAULT_CONFIG["data_vendors"].get(key, "yfinance")
-    for key in _AKSHARE_TOOL_VENDOR_KEYS:
-        if tool_vendors.get(key) == "akshare":
-            tool_vendors.pop(key, None)
+    # Step 1: clear any stale akshare entries in the owned key sets.
+    # Handles both exact form ("akshare") and comma-chain forms
+    # ("akshare,yfinance", "yfinance,akshare", "alpha_vantage,akshare,yfinance").
+    for k in _AKSHARE_DATA_VENDOR_KEYS:
+        if k in data_vendors:
+            default_val = DEFAULT_CONFIG["data_vendors"].get(k, "yfinance")
+            cleaned = _strip_akshare_from_chain(data_vendors[k], default_val)
+            if cleaned != data_vendors[k]:
+                data_vendors[k] = cleaned
+
+    for k in _AKSHARE_TOOL_VENDOR_KEYS:
+        val = tool_vendors.get(k)
+        if isinstance(val, str):
+            cleaned = _strip_akshare_from_chain(val, "")
+            if cleaned == "":
+                tool_vendors.pop(k, None)
+            elif cleaned != val:
+                tool_vendors[k] = cleaned
 
     # Step 2: apply the current-ticker overlay
     if market == Market.A_SHARE:

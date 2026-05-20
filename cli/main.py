@@ -22,7 +22,6 @@ from rich.align import Align
 from rich.rule import Rule
 
 from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
-from tradingagents.market_resolver import to_yfinance_symbol
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
@@ -513,9 +512,6 @@ def get_user_selections():
         )
     )
     selected_ticker = get_ticker()
-    # Rewrite bare crypto bases to -USD suffix so yfinance fetches the crypto
-    # pair rather than a same-named US equity (ETH → ETH-USD, etc.).
-    selected_ticker = to_yfinance_symbol(selected_ticker)
     asset_type = detect_asset_type(selected_ticker)
     console.print(
         f"[green]Detected asset type:[/green] {asset_type.value}"

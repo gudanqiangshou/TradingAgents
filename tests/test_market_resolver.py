@@ -1,11 +1,12 @@
 import pytest
-from tradingagents.market_resolver import resolve_market, Market, to_yfinance_symbol, BARE_CRYPTO_BASES
+from tradingagents.market_resolver import resolve_market, Market
 
 @pytest.mark.unit
 @pytest.mark.parametrize("tk,exp", [
     ("AAPL", Market.US), ("SPY", Market.US), ("7203.T", Market.US), ("CNC.TO", Market.US),
     ("BTC-USD", Market.CRYPTO), ("ETH-USDT", Market.CRYPTO), ("sol-usd", Market.CRYPTO),
-    ("ETH", Market.CRYPTO), ("eth", Market.CRYPTO), ("btc", Market.CRYPTO),
+    # Bare crypto bases now resolve to US (NYSE ETF/equity collision — audit-v3)
+    ("ETH", Market.US), ("eth", Market.US), ("btc", Market.US),
     ("600519", Market.A_SHARE), ("000001", Market.A_SHARE), ("430047", Market.A_SHARE),
     ("600519.SH", Market.A_SHARE), ("000001.SZ", Market.A_SHARE),
     ("600519.SS", Market.A_SHARE), ("430047.BJ", Market.A_SHARE),
@@ -16,7 +17,7 @@ def test_resolve_market(tk, exp):
 
 
 # ---------------------------------------------------------------------------
-# Fix 5: No-collision equity tickers must resolve to US, not CRYPTO
+# No-collision equity tickers must resolve to US, not CRYPTO
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
@@ -41,41 +42,48 @@ def test_suffix_form_still_resolves_to_crypto(tk):
     )
 
 
-@pytest.mark.unit
-def test_bare_crypto_bases_is_unambiguous_subset():
-    """BARE_CRYPTO_BASES must be exactly the 7 no-collision symbols (BCH removed in audit-v2)."""
-    expected = frozenset({"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX"})
-    assert BARE_CRYPTO_BASES == expected, (
-        f"BARE_CRYPTO_BASES mismatch.\n"
-        f"Expected: {sorted(expected)}\n"
-        f"Got:      {sorted(BARE_CRYPTO_BASES)}"
-    )
-
-
 # ---------------------------------------------------------------------------
-# Fix 8: to_yfinance_symbol rewrites bare crypto bases to -USD suffix
+# audit-v3: BARE_CRYPTO_BASES completely removed; bare crypto -> US
 # ---------------------------------------------------------------------------
 
-@pytest.mark.unit
-@pytest.mark.parametrize("raw, expected", [
-    ("ETH",       "ETH-USD"),
-    ("eth",       "ETH-USD"),
-    ("BTC",       "BTC-USD"),
-    ("btc",       "BTC-USD"),
-    ("SOL",       "SOL-USD"),
-    ("AVAX",      "AVAX-USD"),
-    ("ETH-USD",   "ETH-USD"),    # already has suffix — pass through
-    ("ETH-USDT",  "ETH-USDT"),   # already has suffix — pass through
-    ("BTC-USD",   "BTC-USD"),    # already has suffix — pass through
-    ("AAPL",      "AAPL"),       # US equity — unchanged
-    ("600519",    "600519"),     # A-share — unchanged
-    ("0700.HK",   "0700.HK"),    # HK — unchanged
-    ("LTC",       "LTC"),        # removed from BARE_CRYPTO_BASES — unchanged
-    ("ADA",       "ADA"),        # removed from BARE_CRYPTO_BASES — unchanged
-    ("TRX",       "TRX"),        # removed from BARE_CRYPTO_BASES — unchanged
-    ("BCH",       "BCH"),        # removed in audit-v2 (Banco de Chile collision) — unchanged
-])
-def test_to_yfinance_symbol_rewrites_bare_crypto(raw, expected):
-    assert to_yfinance_symbol(raw) == expected, (
-        f"to_yfinance_symbol({raw!r}) → {to_yfinance_symbol(raw)!r}, expected {expected!r}"
-    )
+class TestBareCryptoNoLongerSpecial:
+    """Documents the new behavior after audit-v3: bare crypto bases resolve to US.
+
+    All 7 formerly-whitelisted symbols collide with NYSE Arca or NYSE ETFs:
+    - BTC  -> Grayscale Bitcoin Mini Trust (NYSE Arca: BTC)
+    - ETH  -> Grayscale Ethereum Mini Trust (NYSE Arca: ETH)
+    - XRP  -> Bitwise XRP ETF (NYSE Arca: XRP)
+    - SOL  -> NYSE Emeren Group (NYSE: SOL)
+    - BNB, DOGE, AVAX -- active SEC filings / conflicts
+    """
+
+    @pytest.mark.unit
+    def test_bare_btc_resolves_to_us_due_to_grayscale_etf_collision(self):
+        """BTC resolves to US; Grayscale Bitcoin Mini Trust trades on NYSE Arca as BTC."""
+        assert resolve_market("BTC") == Market.US
+        assert resolve_market("btc") == Market.US
+
+    @pytest.mark.unit
+    def test_bare_eth_resolves_to_us_due_to_grayscale_eth_collision(self):
+        """ETH resolves to US; Grayscale Ethereum Mini Trust trades on NYSE Arca as ETH."""
+        assert resolve_market("ETH") == Market.US
+        assert resolve_market("eth") == Market.US
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("tk", ["XRP", "SOL", "DOGE", "AVAX", "BNB"])
+    def test_bare_xrp_sol_doge_avax_bnb_resolve_to_us(self, tk):
+        """Formerly whitelisted crypto bases all resolve to US (NYSE ETF collision)."""
+        assert resolve_market(tk) == Market.US, (
+            f"Expected {tk!r} to resolve to Market.US after audit-v3 BARE_CRYPTO removal"
+        )
+
+    @pytest.mark.unit
+    def test_explicit_crypto_suffix_still_works(self):
+        """Suffix form is always unambiguous and resolves correctly to CRYPTO."""
+        assert resolve_market("BTC-USD") == Market.CRYPTO
+        assert resolve_market("ETH-USDT") == Market.CRYPTO
+        assert resolve_market("SOL-USD") == Market.CRYPTO
+        assert resolve_market("XRP-USDC") == Market.CRYPTO
+        assert resolve_market("DOGE-USD") == Market.CRYPTO
+        assert resolve_market("AVAX-USD") == Market.CRYPTO
+        assert resolve_market("BNB-BTC") == Market.CRYPTO
