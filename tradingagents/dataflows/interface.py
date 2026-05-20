@@ -29,6 +29,7 @@ from .akshare_china import (
     get_balance_sheet as get_akshare_balance_sheet,
     get_cashflow as get_akshare_cashflow,
     get_income_statement as get_akshare_income_statement,
+    get_news as get_akshare_news,
 )
 
 # Configuration and routing logic
@@ -111,6 +112,7 @@ VENDOR_METHODS = {
     "get_news": {
         "alpha_vantage": get_alpha_vantage_news,
         "yfinance": get_news_yfinance,
+        "akshare": get_akshare_news,
     },
     "get_global_news": {
         "yfinance": get_global_news_yfinance,

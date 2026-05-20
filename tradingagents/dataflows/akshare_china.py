@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 
 from tradingagents.dataflows import _dep_bootstrap
+from tradingagents.dataflows.config import get_config as _config_get
 from tradingagents.market_resolver import resolve_market, Market
 
 
@@ -368,19 +369,158 @@ def get_income_statement(
     )
 
 
+def get_news(ticker: str, start_date: str, end_date: str) -> str:
+    """Return A-share per-stock news as a formatted markdown string.
+
+    Signature matches the yfinance vendor's ``get_news_yfinance`` exactly so
+    that ``route_to_vendor`` can dispatch transparently.
+
+    Parameters
+    ----------
+    ticker:
+        A-share ticker — bare 6-digit code or with exchange suffix
+        (.SH, .SS, .SZ, .BJ), e.g. ``"600519"`` or ``"600519.SH"``.
+    start_date:
+        Start of the date range in ``yyyy-mm-dd`` format.
+    end_date:
+        End of the date range in ``yyyy-mm-dd`` format.
+
+    Returns
+    -------
+    str
+        On success: yfinance-compatible markdown with header
+        ``## {ticker} News, from {start_date} to {end_date}:`` followed by
+        ``### {title} (source: {publisher})`` sections.
+
+        On empty/filtered/error result: a plain-text message (never raises).
+    """
+    # ------------------------------------------------------------------
+    # Guard: this vendor only handles A-share symbols
+    # ------------------------------------------------------------------
+    if resolve_market(ticker) != Market.A_SHARE:
+        return (
+            f"This vendor handles A-share data only. "
+            f"'{ticker}' was classified as non-A-share. "
+            "Please use the appropriate vendor for this symbol."
+        )
+
+    # ------------------------------------------------------------------
+    # Normalise symbol: strip whitespace, upper-case, drop exchange suffix,
+    # then zero-pad to 6 digits (A-share codes are always 6 digits).
+    # ------------------------------------------------------------------
+    code = ticker.strip().upper().split(".")[0].zfill(6)
+
+    # ------------------------------------------------------------------
+    # Load akshare on demand
+    # ------------------------------------------------------------------
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: A-share data source unavailable ({exc})"
+
+    # ------------------------------------------------------------------
+    # Fetch news — catch arbitrary scraping / network errors
+    # ------------------------------------------------------------------
+    try:
+        df = ak.stock_news_em(symbol=code)
+    except Exception as exc:
+        return f"Error: failed to fetch A-share news for {ticker}: {exc}"
+
+    # ------------------------------------------------------------------
+    # Empty result
+    # ------------------------------------------------------------------
+    if df is None or df.empty:
+        return f"No news found for {ticker}"
+
+    # ------------------------------------------------------------------
+    # Shape the DataFrame — guard against unexpected akshare column schema.
+    # akshare changed column names across versions; handle both variants.
+    # ------------------------------------------------------------------
+    try:
+        # Resolve column names (variant A preferred; variant B as fallback)
+        def _col(preferred: str, fallback: str) -> str | None:
+            if preferred in df.columns:
+                return preferred
+            if fallback in df.columns:
+                return fallback
+            return None
+
+        title_col   = _col("新闻标题", "标题")
+        content_col = _col("新闻内容", "内容")
+        summary_col = _col("新闻摘要", "摘要")
+        link_col    = _col("新闻链接", "链接")
+        source_col  = _col("文章来源", "来源")
+        time_col    = _col("发布时间", "时间")
+
+        if title_col is None:
+            raise KeyError("No title column found (expected 新闻标题 or 标题)")
+
+        # Parse publish times (tz-naive); NaT treated as "include without filter"
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt   = datetime.strptime(end_date, "%Y-%m-%d")
+        end_dt_inclusive = end_dt + pd.Timedelta(days=1)
+
+        article_limit = int(_config_get()["news_article_limit"])
+        news_str = ""
+        count = 0
+
+        for _, row in df.iterrows():
+            if count >= article_limit:
+                break
+
+            # Date filter
+            if time_col is not None:
+                raw_time = row.get(time_col, "")
+                pub_ts = pd.to_datetime(raw_time, errors="coerce")
+                if pub_ts is not pd.NaT and not pd.isna(pub_ts):
+                    # Drop tz if present
+                    if hasattr(pub_ts, "tzinfo") and pub_ts.tzinfo is not None:
+                        pub_ts = pub_ts.tz_localize(None)
+                    pub_naive = pub_ts.to_pydatetime().replace(tzinfo=None)
+                    if not (start_dt <= pub_naive < end_dt_inclusive):
+                        continue
+
+            title     = str(row.get(title_col, "")) if title_col else ""
+            publisher = str(row.get(source_col, "")) if source_col else ""
+
+            # Summary: prefer explicit summary column; fall back to truncated content
+            summary = ""
+            if summary_col is not None:
+                summary = str(row.get(summary_col, "") or "").strip()
+            if not summary and content_col is not None:
+                content = str(row.get(content_col, "") or "").strip()
+                summary = content[:200] if content else ""
+
+            link = str(row.get(link_col, "") or "").strip() if link_col else ""
+
+            news_str += f"### {title} (source: {publisher})\n"
+            if summary:
+                news_str += f"{summary}\n"
+            if link:
+                news_str += f"Link: {link}\n"
+            news_str += "\n"
+            count += 1
+
+        if count == 0:
+            return f"No news found for {ticker} between {start_date} and {end_date}"
+
+        return f"## {ticker} News, from {start_date} to {end_date}:\n\n{news_str}"
+
+    except Exception as exc:
+        return f"Error: unexpected A-share news response for {ticker}: {exc}"
+
+
 def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     """Route A-share tickers to the 'akshare' vendor for THIS run only.
 
-    Phase 3 overlay sets:
+    Phase 4 overlay sets all three data categories for A_SHARE:
     - ``core_stock_apis``   → ``"akshare"``  (OHLCV price data)
     - ``fundamental_data``  → ``"akshare"``  (balance_sheet / cashflow /
                                                income_statement / fundamentals)
+    - ``news_data``         → ``"akshare"``  (per-stock news via stock_news_em)
 
-    HK tickers are intentionally NOT routed here yet; they keep using the
-    default yfinance vendor until HK data fetching is implemented in a
-    later phase.
-
-    news_data overlay is deferred to Phase 4.
+    HK tickers are intentionally NOT routed here; they keep using the default
+    yfinance vendor until HK data fetching is implemented in a later phase.
 
     The function REPLACES config["data_vendors"] with a fresh dict rather
     than mutating it in place.  The call sites pass a SHALLOW
@@ -391,9 +531,8 @@ def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     if resolve_market(ticker) != Market.A_SHARE:
         return
     vendors = dict(config.get("data_vendors") or {})
-    # Phase 3: core_stock_apis + fundamental_data (balance_sheet/cashflow/
-    # income_statement/fundamentals) are all handled by akshare for A-share.
-    # news_data will be added in a later phase.
+    # All three categories overlaid for A-share:
     vendors["core_stock_apis"] = "akshare"
     vendors["fundamental_data"] = "akshare"
+    vendors["news_data"] = "akshare"
     config["data_vendors"] = vendors
