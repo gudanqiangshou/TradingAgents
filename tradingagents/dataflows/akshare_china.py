@@ -231,26 +231,52 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
 
     try:
         retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        header = (
-            f"# Company Fundamentals for {ticker.strip().upper()}\n"
-            f"# Data retrieved on: {retrieved_at}\n"
-            "\n"
-        )
 
         if market == Market.A_SHARE:
-            # The DataFrame is long-form: first column = item name, remaining = period values.
-            # Emit label: latest-period-value pairs.
-            item_col = df.columns[0]
-            # Use the second column (most recent period) as the value column
-            value_col = df.columns[1]
+            import re
+            # Locate the indicator-name column: prefer "指标", fall back to "项目".
+            if "指标" in df.columns:
+                item_col = "指标"
+            elif "项目" in df.columns:
+                item_col = "项目"
+            else:
+                raise KeyError("No indicator column found (expected 指标 or 项目)")
+
+            # Find all 8-digit period columns (YYYYMMDD).
+            period_cols = [c for c in df.columns if re.match(r"^\d{8}$", str(c))]
+            if not period_cols:
+                raise ValueError("No 8-digit period columns found in A-share fundamentals DataFrame")
+
+            # Latest period: string comparison works because YYYYMMDD sorts like calendar order.
+            latest_period_col = max(period_cols)
+
+            header = (
+                f"# Company Fundamentals for {ticker.strip().upper()}\n"
+                f"# Data retrieved on: {retrieved_at}\n"
+                f"# Latest period: {latest_period_col}\n"
+                "\n"
+            )
+
             lines = []
             for _, row in df.iterrows():
-                value = row[value_col]
+                indicator = row[item_col]
+                if pd.isna(indicator) or (isinstance(indicator, str) and not indicator.strip()):
+                    continue
+                value = row[latest_period_col]
                 if pd.isna(value) or (isinstance(value, str) and not value.strip()):
                     continue
-                lines.append(f"{row[item_col]}: {value}")
+                if isinstance(value, float):
+                    formatted_value = f"{value:,.2f}"
+                else:
+                    formatted_value = str(value)
+                lines.append(f"{indicator}: {formatted_value}")
         else:
             # HK: wide-form DataFrame; take latest period (iloc[0]) and emit each column
+            header = (
+                f"# Company Fundamentals for {ticker.strip().upper()}\n"
+                f"# Data retrieved on: {retrieved_at}\n"
+                "\n"
+            )
             row = df.iloc[0]
             lines = []
             for col_name in df.columns:
