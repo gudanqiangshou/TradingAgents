@@ -416,3 +416,234 @@ def test_a_share_eastmoney_success_sina_never_called(fake_ak):
 
     assert result.startswith("# Stock data for 600519 from 2026-01-05 to 2026-01-09")
     fake_ak.stock_zh_a_daily.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestGetIndicators — fully offline; stockstats is a project dependency
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+
+
+def _make_ohlcv_year(symbol_code="600519", days=260):
+    """Build ~1-year of daily OHLCV rows ending 2024-06-30 (enough for all indicators).
+
+    Returns a DataFrame with capitalized columns Date/Open/High/Low/Close/Volume
+    and Date as a plain column (not index), sorted ascending — same shape the
+    _fetch_a_share_ohlcv helper returns.
+    """
+    end_date = _dt.date(2024, 6, 30)
+    rows = []
+    close = 1800.0
+    import random
+    rng = random.Random(42)
+    d = end_date - _dt.timedelta(days=days - 1)
+    while d <= end_date:
+        # Skip weekends to be realistic
+        if d.weekday() < 5:
+            close = max(100.0, close * (1 + rng.uniform(-0.02, 0.02)))
+            rows.append({
+                "Date": d.strftime("%Y-%m-%d"),
+                "Open": round(close * 0.998, 2),
+                "High": round(close * 1.01, 2),
+                "Low": round(close * 0.99, 2),
+                "Close": round(close, 2),
+                "Volume": int(rng.uniform(3e6, 6e6)),
+            })
+        d += _dt.timedelta(days=1)
+    return pd.DataFrame(rows)
+
+
+class TestGetIndicators:
+    """Offline tests for akshare_china.get_indicators."""
+
+    def _make_fake_ak(self, ohlcv_df):
+        """Return a fake akshare mock whose stock_zh_a_hist returns ohlcv_df.
+
+        ohlcv_df should already have capitalized English columns as the helper would
+        produce after normalization.  We fake it by setting stock_zh_a_hist to return
+        a df with Chinese columns (what akshare actually returns) so the helper
+        normalizes it, OR we can set it to return directly. For simplicity we return
+        the pre-normalized df wrapped in a Chinese-column dict so the helper's col_map
+        rename becomes a no-op.
+
+        Actually the simplest approach: return the df from stock_zh_a_hist with the
+        Chinese column names that the helper expects to normalize.
+        """
+        # Convert back to Chinese columns so _fetch_a_share_ohlcv normalizes them
+        col_map_rev = {
+            "Date": "日期",
+            "Open": "开盘",
+            "Close": "收盘",
+            "High": "最高",
+            "Low": "最低",
+            "Volume": "成交量",
+        }
+        df_chinese = ohlcv_df.rename(columns=col_map_rev)
+        ak = MagicMock()
+        ak.stock_zh_a_hist.return_value = df_chinese
+        return ak
+
+    @pytest.mark.unit
+    def test_happy_path_50_sma(self):
+        """Returns correct header + date lines + description for close_50_sma."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ohlcv = _make_ohlcv_year()
+        fake_ak = self._make_fake_ak(ohlcv)
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            return_value=fake_ak,
+        ):
+            result = _mod.get_indicators("600519", "close_50_sma", "2024-06-30", 30)
+
+        assert isinstance(result, str)
+        # Header must match exactly
+        assert result.startswith(
+            "## close_50_sma values from 2024-05-31 to 2024-06-30:\n\n"
+        )
+        # Must contain at least 30 date lines
+        lines = [l for l in result.splitlines() if l.strip()]
+        date_lines = [l for l in lines if l[:4].isdigit() and "-" in l[:10]]
+        assert len(date_lines) >= 30, f"Expected >=30 date lines, got {len(date_lines)}"
+        # Description must be appended at the end
+        assert _mod._INDICATOR_CATALOG["close_50_sma"] in result
+
+    @pytest.mark.unit
+    def test_unsupported_indicator_returns_error_string(self):
+        """Unsupported indicator returns error string mentioning the catalog; no raise."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_indicators("600519", "fake_indicator", "2024-06-30", 30)
+
+        assert isinstance(result, str)
+        assert "Error: indicator 'fake_indicator' is not supported" in result
+        assert "Choose from:" in result
+        # ensure must NOT be called (validation fires first)
+        ensure_mock.assert_not_called()
+
+    @pytest.mark.unit
+    def test_non_a_share_returns_clear_message(self):
+        """Non-A-share ticker returns A-share-only message; ensure NOT called."""
+        import tradingagents.dataflows.akshare_china as _mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _mod.get_indicators("AAPL", "close_50_sma", "2024-06-30", 30)
+
+        assert isinstance(result, str)
+        lower = result.lower()
+        assert "a-share" in lower or "a_share" in lower or "a share" in lower
+        ensure_mock.assert_not_called()
+
+    @pytest.mark.unit
+    def test_dependency_unavailable_returns_error_string(self):
+        """DependencyUnavailable → error string starting with 'Error: A-share data source unavailable'."""
+        import tradingagents.dataflows.akshare_china as _vendor_mod
+        DependencyUnavailable = _vendor_mod._dep_bootstrap.DependencyUnavailable
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            side_effect=DependencyUnavailable("akshare: not installed"),
+        ):
+            result = _vendor_mod.get_indicators("600519", "close_50_sma", "2024-06-30", 30)
+
+        assert isinstance(result, str)
+        assert result.lower().startswith("error:")
+        assert "unavailable" in result.lower() or "akshare" in result.lower()
+
+    @pytest.mark.unit
+    def test_both_sources_fail_returns_error_string(self):
+        """Both stock_zh_a_hist and stock_zh_a_daily raising → 'Error: failed to fetch' string."""
+        import tradingagents.dataflows.akshare_china as _vendor_mod
+
+        fake_ak = MagicMock()
+        fake_ak.stock_zh_a_hist.side_effect = ConnectionError("timeout")
+        fake_ak.stock_zh_a_daily.side_effect = ConnectionError("timeout")
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            return_value=fake_ak,
+        ):
+            result = _vendor_mod.get_indicators("600519", "close_50_sma", "2024-06-30", 30)
+
+        assert isinstance(result, str)
+        assert result.lower().startswith("error:")
+        assert "failed to fetch" in result.lower()
+        assert "600519" in result
+
+    @pytest.mark.unit
+    def test_both_sources_empty_returns_no_data_string(self):
+        """Both sources returning empty df → 'No price data found' string."""
+        import tradingagents.dataflows.akshare_china as _vendor_mod
+
+        fake_ak = MagicMock()
+        fake_ak.stock_zh_a_hist.return_value = _make_ak_empty_df()
+        fake_ak.stock_zh_a_daily.return_value = _make_sina_empty_df()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            return_value=fake_ak,
+        ):
+            result = _vendor_mod.get_indicators("600519", "close_50_sma", "2024-06-30", 30)
+
+        assert result == "No price data found for symbol '600519'; cannot compute close_50_sma"
+
+    @pytest.mark.unit
+    def test_invalid_curr_date_returns_error_string(self):
+        """Bad date format → error string; ensure NOT called."""
+        import tradingagents.dataflows.akshare_china as _vendor_mod
+        ensure_mock = MagicMock()
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            ensure_mock,
+        ):
+            result = _vendor_mod.get_indicators("600519", "close_50_sma", "2024/06/30", 30)
+
+        assert isinstance(result, str)
+        assert result.lower().startswith("error:")
+        ensure_mock.assert_not_called()
+
+    @pytest.mark.unit
+    def test_falls_back_to_sina_when_eastmoney_raises_for_indicators(self):
+        """eastmoney raises, Sina returns df → normal indicator window string; stock_zh_a_daily called with sh600519."""
+        import tradingagents.dataflows.akshare_china as _vendor_mod
+
+        ohlcv = _make_ohlcv_year()
+        # Sina df uses English lowercase columns (what the actual endpoint returns)
+        sina_df = ohlcv.rename(columns={
+            "Date": "date", "Open": "open", "High": "high",
+            "Low": "low", "Close": "close", "Volume": "volume",
+        })
+        # Add extra Sina columns to be realistic
+        sina_df["amount"] = 5.0e9
+        sina_df["outstanding_share"] = 1.26e9
+        sina_df["turnover"] = 0.0024
+
+        fake_ak = MagicMock()
+        fake_ak.stock_zh_a_hist.side_effect = ConnectionError("proxy")
+        fake_ak.stock_zh_a_daily.return_value = sina_df
+
+        with patch(
+            "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+            return_value=fake_ak,
+        ):
+            result = _vendor_mod.get_indicators("600519", "close_50_sma", "2024-06-30", 30)
+
+        assert isinstance(result, str)
+        # Should be a valid indicator window
+        assert result.startswith("## close_50_sma values from")
+        # stock_zh_a_daily must have been called with the sh-prefixed symbol
+        assert fake_ak.stock_zh_a_daily.call_count >= 1
+        call_kwargs = fake_ak.stock_zh_a_daily.call_args[1]
+        assert call_kwargs["symbol"] == "sh600519"
+        assert call_kwargs["adjust"] == "qfq"

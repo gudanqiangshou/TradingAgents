@@ -1,7 +1,7 @@
 """Self-contained AkShare A-share data vendor; akshare loaded on demand."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -10,6 +10,80 @@ from tradingagents.dataflows.config import get_config as _config_get
 from tradingagents.market_resolver import resolve_market, Market
 
 logger = logging.getLogger(__name__)
+
+# Sync with tradingagents/dataflows/y_finance.py:get_stock_stats_indicators_window
+_INDICATOR_CATALOG: dict[str, str] = {
+    # Moving Averages
+    "close_50_sma": (
+        "50 SMA: A medium-term trend indicator. "
+        "Usage: Identify trend direction and serve as dynamic support/resistance. "
+        "Tips: It lags price; combine with faster indicators for timely signals."
+    ),
+    "close_200_sma": (
+        "200 SMA: A long-term trend benchmark. "
+        "Usage: Confirm overall market trend and identify golden/death cross setups. "
+        "Tips: It reacts slowly; best for strategic trend confirmation rather than frequent trading entries."
+    ),
+    "close_10_ema": (
+        "10 EMA: A responsive short-term average. "
+        "Usage: Capture quick shifts in momentum and potential entry points. "
+        "Tips: Prone to noise in choppy markets; use alongside longer averages for filtering false signals."
+    ),
+    # MACD Related
+    "macd": (
+        "MACD: Computes momentum via differences of EMAs. "
+        "Usage: Look for crossovers and divergence as signals of trend changes. "
+        "Tips: Confirm with other indicators in low-volatility or sideways markets."
+    ),
+    "macds": (
+        "MACD Signal: An EMA smoothing of the MACD line. "
+        "Usage: Use crossovers with the MACD line to trigger trades. "
+        "Tips: Should be part of a broader strategy to avoid false positives."
+    ),
+    "macdh": (
+        "MACD Histogram: Shows the gap between the MACD line and its signal. "
+        "Usage: Visualize momentum strength and spot divergence early. "
+        "Tips: Can be volatile; complement with additional filters in fast-moving markets."
+    ),
+    # Momentum Indicators
+    "rsi": (
+        "RSI: Measures momentum to flag overbought/oversold conditions. "
+        "Usage: Apply 70/30 thresholds and watch for divergence to signal reversals. "
+        "Tips: In strong trends, RSI may remain extreme; always cross-check with trend analysis."
+    ),
+    # Volatility Indicators
+    "boll": (
+        "Bollinger Middle: A 20 SMA serving as the basis for Bollinger Bands. "
+        "Usage: Acts as a dynamic benchmark for price movement. "
+        "Tips: Combine with the upper and lower bands to effectively spot breakouts or reversals."
+    ),
+    "boll_ub": (
+        "Bollinger Upper Band: Typically 2 standard deviations above the middle line. "
+        "Usage: Signals potential overbought conditions and breakout zones. "
+        "Tips: Confirm signals with other tools; prices may ride the band in strong trends."
+    ),
+    "boll_lb": (
+        "Bollinger Lower Band: Typically 2 standard deviations below the middle line. "
+        "Usage: Indicates potential oversold conditions. "
+        "Tips: Use additional analysis to avoid false reversal signals."
+    ),
+    "atr": (
+        "ATR: Averages true range to measure volatility. "
+        "Usage: Set stop-loss levels and adjust position sizes based on current market volatility. "
+        "Tips: It's a reactive measure, so use it as part of a broader risk management strategy."
+    ),
+    # Volume-Based Indicators
+    "vwma": (
+        "VWMA: A moving average weighted by volume. "
+        "Usage: Confirm trends by integrating price action with volume data. "
+        "Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses."
+    ),
+    "mfi": (
+        "MFI: The Money Flow Index is a momentum indicator that uses both price and volume to measure buying and selling pressure. "
+        "Usage: Identify overbought (>80) or oversold (<20) conditions and confirm the strength of trends or reversals. "
+        "Tips: Use alongside RSI or MACD to confirm signals; divergence between price and MFI can indicate potential reversals."
+    ),
+}
 
 
 def _sina_prefix(code: str) -> str:
@@ -30,6 +104,88 @@ def _sina_prefix(code: str) -> str:
     if one in {"8", "4"}:
         return "bj"
     return "sh"
+
+
+def _fetch_a_share_ohlcv(ak, code: str, start_yyyymmdd: str, end_yyyymmdd: str) -> "tuple[pd.DataFrame | None, Exception | None]":
+    """Try eastmoney stock_zh_a_hist, fall back to Sina stock_zh_a_daily.
+
+    Returns a tuple (df_or_None, last_exc_or_None):
+    - (df, None)   — one source succeeded; df has capitalized columns
+                     Date/Open/High/Low/Close/Volume (Date as a column, not index),
+                     sorted ascending. Never empty when returned with None.
+    - (None, exc)  — at least one source raised an exception; last_exc is the
+                     most-recent exception encountered.
+    - (None, None) — both sources returned empty DataFrames (no exceptions).
+
+    Never raises.
+    """
+    _last_exc: Exception | None = None
+    _any_exc = False
+
+    # Source 1: eastmoney
+    df: pd.DataFrame | None = None
+    try:
+        df = ak.stock_zh_a_hist(
+            symbol=code,
+            period="daily",
+            start_date=start_yyyymmdd,
+            end_date=end_yyyymmdd,
+            adjust="qfq",
+        )
+    except Exception as exc:
+        _last_exc = exc
+        _any_exc = True
+        df = None
+
+    # If eastmoney succeeded with rows, normalize Chinese columns and return
+    if df is not None and not df.empty:
+        col_map = {
+            "日期": "Date",
+            "开盘": "Open",
+            "收盘": "Close",
+            "最高": "High",
+            "最低": "Low",
+            "成交量": "Volume",
+        }
+        df = df.rename(columns=col_map)
+        keep = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+        df = df[keep].copy()
+        df = df.sort_values("Date").reset_index(drop=True)
+        logger.info("A-share OHLCV for %s: eastmoney source succeeded", code)
+        return (df, None)
+
+    # Source 2: Sina fallback
+    prefix = _sina_prefix(code)
+    sina_symbol = prefix + code
+    df_sina: pd.DataFrame | None = None
+    try:
+        df_sina = ak.stock_zh_a_daily(
+            symbol=sina_symbol,
+            start_date=start_yyyymmdd,
+            end_date=end_yyyymmdd,
+            adjust="qfq",
+        )
+    except Exception as sina_exc:
+        _last_exc = sina_exc
+        _any_exc = True
+        df_sina = None
+
+    if df_sina is not None and not df_sina.empty:
+        # Normalize Sina columns (lowercase → capitalize)
+        df_sina = df_sina.rename(columns=str.capitalize)
+        sina_keep = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df_sina.columns]
+        df_sina = df_sina[sina_keep].copy()
+        df_sina = df_sina.sort_values("Date").reset_index(drop=True)
+        logger.info(
+            "A-share OHLCV for %s: eastmoney unavailable, used Sina fallback",
+            code,
+        )
+        return (df_sina, None)
+
+    # Both sources failed or returned empty
+    if _any_exc:
+        return (None, _last_exc)
+    return (None, None)
 
 
 def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
@@ -107,61 +263,16 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     # Fetch data — catch arbitrary scraping errors
     # ------------------------------------------------------------------
     if market == Market.A_SHARE:
-        # --- Multi-source try chain: eastmoney → Sina fallback ---
-        _a_exc: Exception | None = None
-        _source: str = "eastmoney"
-
-        # Source 1: eastmoney (existing)
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=ak_start,
-                end_date=ak_end,
-                adjust="qfq",
+        df_raw, last_exc = _fetch_a_share_ohlcv(ak, code, ak_start, ak_end)
+        if df_raw is None:
+            if last_exc is not None:
+                return f"Error: failed to fetch A-share data for {symbol}: {last_exc}"
+            return (
+                f"No data found for symbol '{symbol}' between {start_date} and {end_date}"
             )
-        except Exception as exc:
-            _a_exc = exc
-            df = None
-
-        # Source 2: Sina fallback (if eastmoney failed or returned empty)
-        if df is None or (hasattr(df, "empty") and df.empty):
-            prefix = _sina_prefix(code)
-            sina_symbol = prefix + code
-            try:
-                df_sina = ak.stock_zh_a_daily(
-                    symbol=sina_symbol,
-                    start_date=ak_start,
-                    end_date=ak_end,
-                    adjust="qfq",
-                )
-                if df_sina is None or (hasattr(df_sina, "empty") and df_sina.empty):
-                    # Both sources empty — let the empty-result check below handle it
-                    df = df_sina
-                    _source = "sina"
-                else:
-                    # Sina succeeded — normalize to standard schema inline
-                    df_sina = df_sina.rename(columns=str.capitalize)
-                    # Drop extra Sina columns, keep only what we need
-                    sina_keep = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df_sina.columns]
-                    df = df_sina[sina_keep].copy()
-                    _source = "sina"
-                    logger.info(
-                        "A-share data for %s: eastmoney unavailable, used Sina fallback",
-                        symbol,
-                    )
-                    # Early-return path via normalized df into shape guard below
-            except Exception as sina_exc:
-                # Both sources failed
-                if _a_exc is not None:
-                    last_exc = _a_exc
-                else:
-                    last_exc = sina_exc
-                return (
-                    f"Error: failed to fetch A-share data for {symbol}: {last_exc}"
-                )
-        else:
-            logger.info("A-share data for %s: eastmoney source succeeded", symbol)
+        # df_raw already has capitalized columns Date/Open/High/Low/Close/Volume,
+        # sorted ascending, Date as a plain column (not index).
+        df = df_raw
     else:
         try:
             # HK: no start/end date params — returns all history; filter client-side
@@ -182,18 +293,8 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     # ------------------------------------------------------------------
     try:
         if market == Market.A_SHARE:
-            # If df already has capitalized English columns (from Sina normalization above),
-            # the rename below is a no-op for those columns.  If it has Chinese columns
-            # (from eastmoney), they get renamed.  Either way we end up with the same shape.
-            col_map = {
-                "日期": "Date",
-                "开盘": "Open",
-                "收盘": "Close",
-                "最高": "High",
-                "最低": "Low",
-                "成交量": "Volume",
-            }
-            df = df.rename(columns=col_map)
+            # _fetch_a_share_ohlcv already returned capitalized English columns
+            # (Date/Open/High/Low/Close/Volume); just select to enforce column order.
             df = df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
         else:
             # HK: English columns date, open, high, low, close, volume
@@ -682,6 +783,136 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
         return f"Error: unexpected A-share news response for {ticker}: {exc}"
 
 
+def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days: int) -> str:
+    """Return A-share technical indicator values as a formatted string.
+
+    Mirrors the contract of ``y_finance.get_stock_stats_indicators_window``:
+    - Same output format: ``## {indicator} values from {before} to {curr_date}``
+      header, one line per calendar day walking BACKWARD, description appended.
+    - Same fail-safe contract: never raises; all error paths return strings.
+
+    Parameters
+    ----------
+    symbol:
+        A-share ticker — bare 6-digit code or with exchange suffix.
+    indicator:
+        One of the 13 supported indicators in ``_INDICATOR_CATALOG``.
+    curr_date:
+        Reference date in ``yyyy-mm-dd`` format.
+    look_back_days:
+        Number of calendar days to walk back from curr_date.
+
+    Returns
+    -------
+    str
+        On success: ``## {indicator} values from {before} to {curr_date}:``
+        followed by one ``{date}: {value}`` line per calendar day, then the
+        indicator description from ``_INDICATOR_CATALOG``.
+
+        On error: a plain-text message starting with ``"Error: ..."`` or
+        ``"No price data found ..."`` (never raises).
+    """
+    # 1. Indicator validation — return error string (no raise) if not in catalog
+    if indicator not in _INDICATOR_CATALOG:
+        return (
+            f"Error: indicator '{indicator}' is not supported. "
+            f"Choose from: {list(_INDICATOR_CATALOG.keys())}"
+        )
+
+    # 2. Non-A-share guard — return message (do NOT touch ensure)
+    if resolve_market(symbol) != Market.A_SHARE:
+        return (
+            f"This vendor handles A-share data only. "
+            f"'{symbol}' was classified as non-A-share. "
+            "Please use the appropriate vendor for this symbol."
+        )
+
+    # 3. Date parse curr_date — if invalid return error string
+    try:
+        curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    except ValueError:
+        return (
+            f"Error: invalid date format for {curr_date!r}; expected yyyy-mm-dd"
+        )
+
+    # 4. Compute fetch window (generous: 400 extra days for 200-SMA + buffer)
+    fetch_start_dt = curr_date_dt - timedelta(days=look_back_days + 400)
+    fetch_start = fetch_start_dt.strftime("%Y%m%d")
+    fetch_end = curr_date_dt.strftime("%Y%m%d")
+
+    code = symbol.strip().upper().split(".")[0]
+
+    # 5. Ensure akshare via _dep_bootstrap
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: A-share data source unavailable ({exc})"
+
+    # 6. Fetch OHLCV through the shared multi-source helper
+    df_raw, last_exc = _fetch_a_share_ohlcv(ak, code, fetch_start, fetch_end)
+    if df_raw is None:
+        if last_exc is not None:
+            return f"Error: failed to fetch A-share indicators for {symbol}: {last_exc}"
+        return f"No price data found for symbol '{symbol}'; cannot compute {indicator}"
+
+    # 7. Shape block — all stockstats work; guard unexpected schema errors
+    try:
+        from stockstats import wrap  # stockstats is a project dependency
+
+        df = df_raw.copy()
+        # Ensure Date column is datetime for stockstats wrap
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date"])
+
+        # Coerce OHLCV to numeric (in case helper returned object columns)
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["Close"])
+
+        # stockstats wrap — must have Date as a column, not index
+        df = wrap(df)
+        # Format Date strings after wrap (mirrors yfinance _get_stock_stats_bulk)
+        df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
+
+        # Trigger stockstats indicator calculation
+        df[indicator]
+
+        # Build {date_str: value_str} lookup dict
+        date_value: dict[str, str] = {}
+        for _, row in df.iterrows():
+            date_str = row["Date"]
+            val = row[indicator]
+            if pd.isna(val):
+                date_value[date_str] = "N/A"
+            else:
+                date_value[date_str] = str(val)
+
+    except Exception as exc:
+        return f"Error: unexpected A-share indicator response for {symbol}: {exc}"
+
+    # 8. Walk dates BACK from curr_date through look_back_days
+    before_dt = curr_date_dt - timedelta(days=look_back_days)
+    before_date = before_dt.strftime("%Y-%m-%d")
+
+    ind_string = ""
+    current_dt = curr_date_dt
+    while current_dt >= before_dt:
+        date_str = current_dt.strftime("%Y-%m-%d")
+        value = date_value.get(date_str, "N/A: Not a trading day (weekend or holiday)")
+        ind_string += f"{date_str}: {value}\n"
+        current_dt = current_dt - timedelta(days=1)
+
+    # 9. Compose result (mirrors yfinance result_str format)
+    result_str = (
+        f"## {indicator} values from {before_date} to {curr_date}:\n\n"
+        + ind_string
+        + "\n\n"
+        + _INDICATOR_CATALOG[indicator]
+    )
+    return result_str
+
+
 def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     """Route A-share or HK tickers to the 'akshare' vendor for THIS run only.
 
@@ -689,12 +920,13 @@ def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     because AkShare covers different methods for each market.
 
     **A_SHARE** (category-wide overlay):
-    Replaces ``config["data_vendors"]`` with a fresh dict and sets all three
+    Replaces ``config["data_vendors"]`` with a fresh dict and sets all four
     data categories:
-    - ``core_stock_apis``   → ``"akshare"``  (OHLCV price data)
-    - ``fundamental_data``  → ``"akshare"``  (balance_sheet / cashflow /
-                                               income_statement / fundamentals)
-    - ``news_data``         → ``"akshare"``  (per-stock news via stock_news_em)
+    - ``core_stock_apis``       → ``"akshare"``  (OHLCV price data)
+    - ``fundamental_data``      → ``"akshare"``  (balance_sheet / cashflow /
+                                                   income_statement / fundamentals)
+    - ``news_data``             → ``"akshare"``  (per-stock news via stock_news_em)
+    - ``technical_indicators``  → ``"akshare"``  (indicators via stockstats + eastmoney/Sina)
 
     **HK** (per-method tool_vendors overlay):
     AkShare only covers HK OHLCV (``stock_hk_daily``) and HK key indicators
@@ -704,7 +936,7 @@ def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     - ``get_stock_data``   → ``"akshare"``
     - ``get_fundamentals`` → ``"akshare"``
     Does NOT touch ``data_vendors`` (yfinance remains the category default for
-    all other HK methods).
+    all other HK methods, including technical_indicators).
 
     **US / CRYPTO**: no-op; config unchanged.
 
@@ -719,10 +951,11 @@ def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
 
     if market == Market.A_SHARE:
         vendors = dict(config.get("data_vendors") or {})
-        # All three categories overlaid for A-share:
+        # All four categories overlaid for A-share:
         vendors["core_stock_apis"] = "akshare"
         vendors["fundamental_data"] = "akshare"
         vendors["news_data"] = "akshare"
+        vendors["technical_indicators"] = "akshare"
         config["data_vendors"] = vendors
 
     elif market == Market.HK:

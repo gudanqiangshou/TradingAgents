@@ -30,6 +30,7 @@ from .akshare_china import (
     get_cashflow as get_akshare_cashflow,
     get_income_statement as get_akshare_income_statement,
     get_news as get_akshare_news,
+    get_indicators as get_akshare_indicators,
 )
 
 # Configuration and routing logic
@@ -86,6 +87,7 @@ VENDOR_METHODS = {
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "akshare": get_akshare_indicators,
     },
     # fundamental_data
     "get_fundamentals": {
