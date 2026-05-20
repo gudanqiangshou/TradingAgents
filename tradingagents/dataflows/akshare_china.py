@@ -180,7 +180,10 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
         value_col = df.columns[1]
         lines = []
         for _, row in df.iterrows():
-            lines.append(f"{row[item_col]}: {row[value_col]}")
+            value = row[value_col]
+            if pd.isna(value) or (isinstance(value, str) and not value.strip()):
+                continue
+            lines.append(f"{row[item_col]}: {value}")
 
         retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         header = (

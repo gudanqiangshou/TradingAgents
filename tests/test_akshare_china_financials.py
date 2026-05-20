@@ -8,6 +8,7 @@ All tests are marked @pytest.mark.unit.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import pandas as pd
 from unittest.mock import MagicMock, patch
@@ -168,6 +169,28 @@ class TestGetFundamentals:
             result = _vendor_mod.get_fundamentals("600519", curr_date="2024-09-30")
         assert result.startswith("# Company Fundamentals for")
 
+    @pytest.mark.unit
+    def test_skips_rows_with_blank_or_nan_values(self):
+        """Rows whose value is NaN, None, or empty/whitespace are omitted from output."""
+        ak = MagicMock()
+        ak.stock_financial_abstract.return_value = pd.DataFrame({
+            "指标": ["PE", "净利润", "营业收入", "每股收益", "ROE"],
+            "2024Q3": ["12.3", np.nan, None, "", "15.6"],
+        })
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_fundamentals("600519")
+
+        # Real-valued rows must appear
+        assert "PE: 12.3" in result
+        assert "ROE: 15.6" in result
+
+        # Blank/NaN/None rows must NOT appear
+        assert ": nan" not in result
+        assert "nan\n" not in result
+        assert ": None" not in result
+        # Empty-string value row must not produce a blank-value line
+        assert "每股收益: " not in result.split("\n\n", 1)[1]
+
 
 # ---------------------------------------------------------------------------
 # get_balance_sheet
@@ -273,6 +296,15 @@ class TestGetBalanceSheet:
             # Should not raise; both rows intact
             result = _vendor_mod.get_balance_sheet("600519", curr_date="2024-12-31")
         assert "# Balance Sheet data for" in result
+
+    @pytest.mark.unit
+    def test_bj_suffix_normalized(self):
+        """BJ (Beijing exchange) suffix should be stripped to bare 6-digit code."""
+        ak = _fake_ak_with_all()
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            _vendor_mod.get_balance_sheet("430047.BJ")
+        call_kwargs = ak.stock_balance_sheet_by_report_em.call_args[1]
+        assert call_kwargs["symbol"] == "430047"
 
 
 # ---------------------------------------------------------------------------
