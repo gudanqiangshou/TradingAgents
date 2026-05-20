@@ -463,3 +463,44 @@ class TestGetFundamentalsHK:
 
         # ticker.strip().upper() → "00700.HK"
         assert result.startswith("# Company Fundamentals for 00700.HK")
+
+    @pytest.mark.unit
+    def test_get_fundamentals_hk_filters_by_report_date_curr_date(self):
+        """History-aware: REPORT_DATE rows after curr_date must be excluded.
+
+        Mock has REPORT_DATE 2026-03-31, 2023-12-31.
+        With curr_date='2024-01-01', only 2023-12-31 row is eligible;
+        its fields must appear but NOT the 2026 row's fields.
+        """
+        ak = MagicMock()
+        ak.stock_financial_hk_analysis_indicator_em.return_value = pd.DataFrame({
+            "REPORT_DATE": ["2026-03-31", "2023-12-31"],
+            "BASIC_EPS": [15.0, 12.3],     # 12.3 is from the 2023 row
+            "EPS_TTM": [16.5, 13.1],
+        })
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_fundamentals("00700.HK", curr_date="2024-01-01")
+
+        assert isinstance(result, str)
+        assert result.startswith("# Company Fundamentals for 00700.HK")
+        # The 2023-12-31 row values must appear
+        assert "BASIC_EPS: 12.3" in result
+        assert "EPS_TTM: 13.1" in result
+        # The 2026-03-31 row values must NOT appear
+        assert "BASIC_EPS: 15.0" not in result
+        assert "EPS_TTM: 16.5" not in result
+
+    @pytest.mark.unit
+    def test_get_fundamentals_hk_no_eligible_report_date_returns_no_data(self):
+        """All REPORT_DATE values after curr_date → informative no-data string."""
+        ak = MagicMock()
+        ak.stock_financial_hk_analysis_indicator_em.return_value = pd.DataFrame({
+            "REPORT_DATE": ["2026-03-31", "2025-12-31"],
+            "BASIC_EPS": [15.0, 14.0],
+        })
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_fundamentals("00700.HK", curr_date="2024-01-01")
+
+        assert isinstance(result, str)
+        assert "on or before" in result
+        assert "2024-01-01" in result

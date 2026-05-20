@@ -15,11 +15,17 @@ class Market(str, Enum):
 # Crypto pair suffixes (preserves existing suffix-based detection)
 _CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
 
-# Mainstream bare crypto base symbols — intentionally extensible, kept conservative
-BARE_CRYPTO_BASES = {
-    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "LTC", "BCH",
-    "TRX", "DOT", "AVAX",
-}
+# Mainstream bare crypto base symbols — restricted to symbols with NO known
+# US-equity ticker collision.  Symbols removed from earlier versions:
+#   LTC  → LTC Properties (NYSE)
+#   ADA  → ambiguous / historical equity conflicts
+#   TRX  → TRX Gold (NYSE American)
+#   DOT  → ambiguous / historical equity conflicts
+# Users who specifically want those as crypto should use the suffix form
+# (e.g. LTC-USD, TRX-USDT) which is always unambiguous.
+BARE_CRYPTO_BASES = frozenset({
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "BCH", "AVAX",
+})
 
 # A-share: 6-digit code, optionally suffixed with .SH / .SS / .SZ / .BJ
 _A_SHARE_RE = re.compile(r"^\d{6}(\.(SH|SS|SZ|BJ))?$")
@@ -53,3 +59,30 @@ def resolve_market(ticker: str) -> Market:
 
     # 4. Default: US / international suffixed tickers (AAPL, 7203.T, CNC.TO)
     return Market.US
+
+
+def to_yfinance_symbol(ticker: str) -> str:
+    """Canonicalize a ticker for the yfinance vendor.
+
+    Bare crypto base symbols (e.g. ``'ETH'``, ``'BTC'``) are rewritten to
+    suffix form (``'ETH-USD'``, ``'BTC-USD'``) so yfinance fetches the crypto
+    pair, not the same-named US equity (e.g. NYSE ``ETH`` = Ethan Allen
+    Interiors, NYSE ``BTC`` = Grayscale Bitcoin Trust on some dates).
+
+    Existing suffix forms (``'ETH-USDT'``, ``'BTC-USD'``) and all non-crypto
+    tickers are returned unchanged.
+
+    Parameters
+    ----------
+    ticker:
+        Raw ticker string as entered by the user.
+
+    Returns
+    -------
+    str
+        Canonical ticker for yfinance consumption.
+    """
+    t = ticker.strip().upper()
+    if t in BARE_CRYPTO_BASES:
+        return f"{t}-USD"
+    return t

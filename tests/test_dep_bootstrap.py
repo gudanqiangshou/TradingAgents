@@ -498,3 +498,94 @@ def test_pip_install_argv_when_uv_absent():
 
     for spec in mod.CHINA_DATA_PINS:
         assert spec in argv, f"Expected '{spec}' in argv but got: {argv}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: new catch-all tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_runtime_error_during_import_translates_to_dependency_unavailable():
+    """A post-install import that raises RuntimeError (not ImportError) must be
+    caught and translated to DependencyUnavailable, not propagate raw.
+
+    Context: the fast-path (before the lock) only catches ImportError — if the
+    module was never installed it can't raise RuntimeError there.  The post-install
+    retry path catches all exceptions via 'except Exception'.
+    """
+    mod = _import_bootstrap()
+
+    # Fast path: first import raises ImportError (module missing — normal)
+    # Post-install retry: raises RuntimeError (simulates a broken/misconfigured package)
+    state = {"pip_ran": False}
+
+    def side_effect_import(name, *args, **kwargs):
+        if not state["pip_ran"]:
+            raise ImportError(f"No module named '{name}'")
+        # After pip "succeeds", the module raises RuntimeError on import
+        raise RuntimeError("boom — package misconfigured")
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.stderr = ""
+
+    def run_side_effect(*args, **kwargs):
+        state["pip_ran"] = True
+        return mock_proc
+
+    mock_importlib = MagicMock(wraps=_real_importlib)
+    mock_importlib.import_module.side_effect = side_effect_import
+    mock_importlib.invalidate_caches = MagicMock()
+
+    mock_subprocess = MagicMock()
+    mock_subprocess.run.side_effect = run_side_effect
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
+
+    with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
+
+        with pytest.raises(mod.DependencyUnavailable):
+            mod.ensure("brokenpkg")
+
+
+@pytest.mark.unit
+def test_file_not_found_during_install_translates_to_dependency_unavailable():
+    """FileNotFoundError when launching subprocess (installer binary gone after
+    which() check) must be caught and translated to DependencyUnavailable.
+    """
+    mod = _import_bootstrap()
+
+    mock_importlib = MagicMock(wraps=_real_importlib)
+    mock_importlib.import_module.side_effect = ImportError("no module")
+
+    mock_subprocess = MagicMock()
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
+    mock_subprocess.run.side_effect = FileNotFoundError("uv missing")
+
+    with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
+
+        with pytest.raises(mod.DependencyUnavailable):
+            mod.ensure("mypkg")
+
+    # Must have recorded the failure so it won't retry
+    assert mock_subprocess.run.call_count == 1
+
+
+@pytest.mark.unit
+def test_os_error_during_install_translates_to_dependency_unavailable():
+    """Generic OSError during subprocess launch → DependencyUnavailable."""
+    mod = _import_bootstrap()
+
+    mock_importlib = MagicMock(wraps=_real_importlib)
+    mock_importlib.import_module.side_effect = ImportError("no module")
+
+    mock_subprocess = MagicMock()
+    mock_subprocess.TimeoutExpired = _real_subprocess.TimeoutExpired
+    mock_subprocess.run.side_effect = OSError("permission denied")
+
+    with patch(f"{_MOD_PATH}.importlib", mock_importlib), \
+         patch(f"{_MOD_PATH}.subprocess", mock_subprocess):
+
+        with pytest.raises(mod.DependencyUnavailable):
+            mod.ensure("mypkg")

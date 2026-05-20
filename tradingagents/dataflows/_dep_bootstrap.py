@@ -151,6 +151,18 @@ def ensure(
             )
             _failed_installs.add(import_name)
             raise DependencyUnavailable(f"{import_name}: pip install timed out") from e
+        except Exception as e:
+            # FileNotFoundError if the installer binary is gone, PermissionError,
+            # OSError, or any other OS-level failure launching the subprocess.
+            elapsed = time.monotonic() - t0
+            logger.error(
+                "pip install failed to launch after %.1fs for %s: %s",
+                elapsed, import_name, e,
+            )
+            _failed_installs.add(import_name)
+            raise DependencyUnavailable(
+                f"{import_name}: pip install could not be launched ({type(e).__name__}: {e})"
+            ) from e
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -176,14 +188,18 @@ def ensure(
 
         try:
             module = importlib.import_module(import_name)
-        except ImportError as e:
+        except Exception as e:
+            # Broadened from ImportError: a package that raises RuntimeError or
+            # any other exception on import in the post-install recovery context
+            # means the install didn't produce a working module.  Translate to
+            # DependencyUnavailable so callers get a consistent exception type.
             logger.error(
-                "pip install succeeded but '%s' still cannot be imported",
-                import_name,
+                "pip install succeeded but '%s' raised %s on import: %s",
+                import_name, type(e).__name__, e,
             )
             _failed_installs.add(import_name)
             raise DependencyUnavailable(
-                f"{import_name}: installed but still not importable"
+                f"{import_name}: installed but import raised {type(e).__name__}: {e}"
             ) from e
 
         return module

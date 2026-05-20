@@ -212,3 +212,100 @@ def test_default_config_unchanged():
     # But yfinance and alpha_vantage must still be there too
     assert "yfinance" in interface.VENDOR_METHODS["get_stock_data"]
     assert "alpha_vantage" in interface.VENDOR_METHODS["get_stock_data"]
+
+
+# ---------------------------------------------------------------------------
+# 7. overlay always-reset: stale HK tool_vendors cleared for subsequent US run
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_overlay_resets_stale_tool_vendors_from_prior_hk_run(monkeypatch):
+    """Simulate the exact production pollution scenario.
+
+    A prior HK run left tool_vendors={"get_stock_data":"akshare",...} in
+    _config.  A subsequent US ticker (AAPL) call must see tool_vendors={} after
+    apply_china_vendor_overlay, not the stale HK values.
+    """
+    import copy
+    import tradingagents.default_config as dc
+    import tradingagents.dataflows.config as cfg_mod
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+
+    # Build a config that simulates what set_config (merge) would have left after
+    # a prior HK run: tool_vendors still has akshare overrides.
+    polluted = copy.deepcopy(dc.DEFAULT_CONFIG)
+    polluted["tool_vendors"] = {"get_stock_data": "akshare", "get_fundamentals": "akshare"}
+
+    # Now run overlay for a US ticker using the polluted config
+    apply_china_vendor_overlay(polluted, "AAPL")
+
+    # tool_vendors must be completely cleared (not merged — replaced)
+    assert polluted["tool_vendors"] == {}, (
+        f"Expected empty tool_vendors after US overlay, got: {polluted['tool_vendors']}"
+    )
+
+    # data_vendors must be reset to yfinance defaults (not any akshare leftovers)
+    assert polluted["data_vendors"]["core_stock_apis"] == "yfinance"
+    assert polluted["data_vendors"]["fundamental_data"] == "yfinance"
+    assert polluted["data_vendors"]["news_data"] == "yfinance"
+    assert polluted["data_vendors"]["technical_indicators"] == "yfinance"
+
+
+@pytest.mark.unit
+def test_overlay_resets_stale_data_vendors_from_prior_a_share_run(monkeypatch):
+    """Inverse scenario: prior A-share run left data_vendors full of 'akshare'.
+
+    After apply_china_vendor_overlay for an HK ticker, data_vendors must be
+    reset to yfinance defaults (HK overlay only touches tool_vendors).
+    """
+    import copy
+    import tradingagents.default_config as dc
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+
+    # Polluted config left by a prior A-share run
+    polluted = copy.deepcopy(dc.DEFAULT_CONFIG)
+    polluted["data_vendors"] = {
+        "core_stock_apis": "akshare",
+        "fundamental_data": "akshare",
+        "news_data": "akshare",
+        "technical_indicators": "akshare",
+    }
+    polluted["tool_vendors"] = {}
+
+    # Now run overlay for an HK ticker
+    apply_china_vendor_overlay(polluted, "0700.HK")
+
+    # data_vendors must be reset to yfinance (HK overlay must not inherit A-share pollution)
+    assert polluted["data_vendors"]["core_stock_apis"] == "yfinance", (
+        "HK overlay must reset data_vendors to yfinance defaults; A-share pollution persisted"
+    )
+    assert polluted["data_vendors"]["fundamental_data"] == "yfinance"
+    assert polluted["data_vendors"]["news_data"] == "yfinance"
+    assert polluted["data_vendors"]["technical_indicators"] == "yfinance"
+
+    # HK tool_vendors must still have the two HK overrides
+    assert polluted["tool_vendors"]["get_stock_data"] == "akshare"
+    assert polluted["tool_vendors"]["get_fundamentals"] == "akshare"
+
+
+@pytest.mark.unit
+def test_overlay_is_idempotent():
+    """Calling apply_china_vendor_overlay twice for the same ticker yields the same result."""
+    import copy
+    import tradingagents.default_config as dc
+    from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
+
+    for ticker in ("600519", "0700.HK", "AAPL", "BTC-USD"):
+        cfg_a = copy.deepcopy(dc.DEFAULT_CONFIG)
+        apply_china_vendor_overlay(cfg_a, ticker)
+
+        cfg_b = copy.deepcopy(dc.DEFAULT_CONFIG)
+        apply_china_vendor_overlay(cfg_b, ticker)
+        apply_china_vendor_overlay(cfg_b, ticker)  # second call
+
+        assert cfg_a["data_vendors"] == cfg_b["data_vendors"], (
+            f"data_vendors not idempotent for ticker={ticker!r}"
+        )
+        assert cfg_a["tool_vendors"] == cfg_b["tool_vendors"], (
+            f"tool_vendors not idempotent for ticker={ticker!r}"
+        )

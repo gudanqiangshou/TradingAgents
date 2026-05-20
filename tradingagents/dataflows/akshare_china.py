@@ -139,20 +139,29 @@ def _fetch_a_share_ohlcv(ak, code: str, start_yyyymmdd: str, end_yyyymmdd: str) 
 
     # If eastmoney succeeded with rows, normalize Chinese columns and return
     if df is not None and not df.empty:
-        col_map = {
-            "日期": "Date",
-            "开盘": "Open",
-            "收盘": "Close",
-            "最高": "High",
-            "最低": "Low",
-            "成交量": "Volume",
-        }
-        df = df.rename(columns=col_map)
-        keep = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df.columns]
-        df = df[keep].copy()
-        df = df.sort_values("Date").reset_index(drop=True)
-        logger.info("A-share OHLCV for %s: eastmoney source succeeded", code)
-        return (df, None)
+        try:
+            col_map = {
+                "日期": "Date",
+                "开盘": "Open",
+                "收盘": "Close",
+                "最高": "High",
+                "最低": "Low",
+                "成交量": "Volume",
+            }
+            df = df.rename(columns=col_map)
+            keep = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+            df = df[keep].copy()
+            df = df.sort_values("Date").reset_index(drop=True)
+            logger.info("A-share OHLCV for %s: eastmoney source succeeded", code)
+            return (df, None)
+        except Exception as exc:
+            logger.warning(
+                "A-share OHLCV for %s: eastmoney schema normalization failed (%s); "
+                "trying Sina fallback",
+                code, exc,
+            )
+            _last_exc = exc
+            _any_exc = True
 
     # Source 2: Sina fallback
     prefix = _sina_prefix(code)
@@ -171,16 +180,24 @@ def _fetch_a_share_ohlcv(ak, code: str, start_yyyymmdd: str, end_yyyymmdd: str) 
         df_sina = None
 
     if df_sina is not None and not df_sina.empty:
-        # Normalize Sina columns (lowercase → capitalize)
-        df_sina = df_sina.rename(columns=str.capitalize)
-        sina_keep = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df_sina.columns]
-        df_sina = df_sina[sina_keep].copy()
-        df_sina = df_sina.sort_values("Date").reset_index(drop=True)
-        logger.info(
-            "A-share OHLCV for %s: eastmoney unavailable, used Sina fallback",
-            code,
-        )
-        return (df_sina, None)
+        try:
+            # Normalize Sina columns (lowercase → capitalize)
+            df_sina = df_sina.rename(columns=str.capitalize)
+            sina_keep = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df_sina.columns]
+            df_sina = df_sina[sina_keep].copy()
+            df_sina = df_sina.sort_values("Date").reset_index(drop=True)
+            logger.info(
+                "A-share OHLCV for %s: eastmoney unavailable, used Sina fallback",
+                code,
+            )
+            return (df_sina, None)
+        except Exception as exc:
+            logger.warning(
+                "A-share OHLCV for %s: Sina schema normalization failed (%s)",
+                code, exc,
+            )
+            _last_exc = exc
+            _any_exc = True
 
     # Both sources failed or returned empty
     if _any_exc:
@@ -418,11 +435,23 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
                 raise KeyError("No indicator column found (expected 指标 or 项目)")
 
             # Find all 8-digit period columns (YYYYMMDD).
-            period_cols = [c for c in df.columns if re.match(r"^\d{8}$", str(c))]
+            period_cols = [c for c in df.columns if re.fullmatch(r"\d{8}", str(c))]
             if not period_cols:
                 raise ValueError("No 8-digit period columns found in A-share fundamentals DataFrame")
 
-            # Latest period: string comparison works because YYYYMMDD sorts like calendar order.
+            # History-aware: filter out period columns that are AFTER curr_date
+            # so a backtest with curr_date="2024-01-01" doesn't see 2026 data.
+            if curr_date:
+                cutoff_yyyymmdd = curr_date.replace("-", "")
+                period_cols = [c for c in period_cols if str(c) <= cutoff_yyyymmdd]
+                if not period_cols:
+                    return (
+                        f"No fundamentals data found for symbol '{ticker}' "
+                        f"on or before {curr_date}"
+                    )
+
+            # Latest period (after curr_date filter): string comparison works
+            # because YYYYMMDD sorts like calendar order.
             latest_period_col = max(period_cols)
 
             header = (
@@ -446,13 +475,28 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
                     formatted_value = str(value)
                 lines.append(f"{indicator}: {formatted_value}")
         else:
-            # HK: wide-form DataFrame; take latest period (iloc[0]) and emit each column
+            # HK: wide-form DataFrame with a REPORT_DATE column.
+            # History-aware: take the row whose REPORT_DATE is the latest ≤ curr_date.
+            if curr_date and "REPORT_DATE" in df.columns:
+                df_hk = df.copy()
+                df_hk["_rd"] = pd.to_datetime(df_hk["REPORT_DATE"], errors="coerce")
+                cutoff = pd.Timestamp(curr_date)
+                df_hk = df_hk[df_hk["_rd"] <= cutoff].sort_values("_rd", ascending=False)
+                df_hk = df_hk.drop(columns=["_rd"])
+                if df_hk.empty:
+                    return (
+                        f"No fundamentals data found for symbol '{ticker}' "
+                        f"on or before {curr_date}"
+                    )
+                row = df_hk.iloc[0]
+            else:
+                row = df.iloc[0]
+
             header = (
                 f"# Company Fundamentals for {ticker.strip().upper()}\n"
                 f"# Data retrieved on: {retrieved_at}\n"
                 "\n"
             )
-            row = df.iloc[0]
             lines = []
             for col_name in df.columns:
                 value = row[col_name]
@@ -695,14 +739,24 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
         return f"Error: failed to fetch A-share news for {ticker}: {exc}"
 
     # ------------------------------------------------------------------
-    # Empty result
+    # Empty result — also guard against endpoint returning a list (not DataFrame)
     # ------------------------------------------------------------------
-    if df is None or df.empty:
+    if df is None:
+        return f"No news found for {ticker}"
+    # Some akshare versions return [] (a list) instead of an empty DataFrame
+    if not isinstance(df, pd.DataFrame):
+        if len(df) == 0:
+            return f"No news found for {ticker}"
+        return f"Error: unexpected A-share news response for {ticker}: got {type(df).__name__}, expected DataFrame"
+    if df.empty:
         return f"No news found for {ticker}"
 
     # ------------------------------------------------------------------
     # Shape the DataFrame — guard against unexpected akshare column schema.
     # akshare changed column names across versions; handle both variants.
+    # Outer try/except covers the ENTIRE shape+loop so any unexpected
+    # schema change (KeyError, AttributeError, etc.) returns an error string
+    # rather than propagating to the caller.
     # ------------------------------------------------------------------
     try:
         # Resolve column names (variant A preferred; variant B as fallback)
@@ -753,8 +807,12 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
                     if not (start_dt <= pub_naive < end_dt_inclusive):
                         continue
 
-            title     = str(row.get(title_col, "")) if title_col else ""
-            publisher = str(row.get(source_col, "")) if source_col else ""
+            title     = _safe_str(row.get(title_col, "")) if title_col else ""
+            publisher = _safe_str(row.get(source_col, "")) if source_col else ""
+
+            # Skip articles with no title — they are useless news entries
+            if not title:
+                continue
 
             # Summary: prefer explicit summary column; fall back to truncated content
             summary = ""
@@ -916,54 +974,70 @@ def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days: 
 def apply_china_vendor_overlay(config: dict, ticker: str) -> None:
     """Route A-share or HK tickers to the 'akshare' vendor for THIS run only.
 
+    **Always-reset design (critical for correctness):**
+    This function ALWAYS writes fresh ``data_vendors`` and ``tool_vendors``
+    dicts into *config*, regardless of market and regardless of what was
+    previously in those keys.  This prevents a well-known pollution bug:
+    ``tradingagents/dataflows/config.py:set_config`` does a one-level nested-dict
+    MERGE (not replace), so a stale ``tool_vendors={"get_stock_data":"akshare"}``
+    left from a prior HK run survives unchanged when a subsequent US/CRYPTO call
+    passes ``tool_vendors={}`` — the merge is a no-op.  By always writing the
+    full desired state here, every overlay call produces a known clean slate.
+
     Design: A_SHARE vs HK use fundamentally different overlay strategies
     because AkShare covers different methods for each market.
 
     **A_SHARE** (category-wide overlay):
-    Replaces ``config["data_vendors"]`` with a fresh dict and sets all four
-    data categories:
+    Resets ``config["data_vendors"]`` to a fresh copy of the default and
+    overrides all four data categories:
     - ``core_stock_apis``       → ``"akshare"``  (OHLCV price data)
     - ``fundamental_data``      → ``"akshare"``  (balance_sheet / cashflow /
                                                    income_statement / fundamentals)
     - ``news_data``             → ``"akshare"``  (per-stock news via stock_news_em)
     - ``technical_indicators``  → ``"akshare"``  (indicators via stockstats + eastmoney/Sina)
+    Resets ``config["tool_vendors"]`` to ``{}`` (no per-method overrides needed).
 
     **HK** (per-method tool_vendors overlay):
     AkShare only covers HK OHLCV (``stock_hk_daily``) and HK key indicators
     (``stock_financial_hk_analysis_indicator_em``).  Statements and news are
     NOT available from AkShare for HK, so those fall back to yfinance.
-    Sets per-method overrides in ``config["tool_vendors"]``:
+    Resets ``config["data_vendors"]`` to the default (yfinance for all
+    categories) and sets per-method overrides in ``config["tool_vendors"]``:
     - ``get_stock_data``   → ``"akshare"``
     - ``get_fundamentals`` → ``"akshare"``
-    Does NOT touch ``data_vendors`` (yfinance remains the category default for
-    all other HK methods, including technical_indicators).
 
-    **US / CRYPTO**: no-op; config unchanged.
+    **US / CRYPTO**: resets both ``data_vendors`` and ``tool_vendors`` to the
+    default/empty state so any stale pollution from a prior A-share or HK run
+    is cleared.
 
     Aliasing safety:
-    Both paths create a fresh dict (``dict(...)`` copy) rather than mutating the
-    existing nested dict in place.  Call sites may pass a SHALLOW
-    ``DEFAULT_CONFIG.copy()``, so ``config["data_vendors"]`` and
-    ``config["tool_vendors"]`` could be the SAME objects as in the module-global
-    ``DEFAULT_CONFIG``; mutating them in place would corrupt that global.
+    All paths create fresh dicts rather than mutating any nested dict in place.
+    Call sites may pass a SHALLOW ``DEFAULT_CONFIG.copy()``, so
+    ``config["data_vendors"]`` and ``config["tool_vendors"]`` could be the SAME
+    objects as in the module-global ``DEFAULT_CONFIG``; mutating them in place
+    would corrupt that global.
     """
+    from tradingagents.default_config import DEFAULT_CONFIG  # local import avoids circularity
+
     market = resolve_market(ticker)
 
+    # Baseline: always reset both dicts to clean defaults first.
+    # This clears any pollution left by a prior overlay call for a different market.
+    config["data_vendors"] = dict(DEFAULT_CONFIG["data_vendors"])
+    config["tool_vendors"] = {}
+
     if market == Market.A_SHARE:
-        vendors = dict(config.get("data_vendors") or {})
-        # All four categories overlaid for A-share:
-        vendors["core_stock_apis"] = "akshare"
-        vendors["fundamental_data"] = "akshare"
-        vendors["news_data"] = "akshare"
-        vendors["technical_indicators"] = "akshare"
-        config["data_vendors"] = vendors
+        # All four categories overlaid for A-share (data_vendors already fresh from baseline):
+        config["data_vendors"]["core_stock_apis"] = "akshare"
+        config["data_vendors"]["fundamental_data"] = "akshare"
+        config["data_vendors"]["news_data"] = "akshare"
+        config["data_vendors"]["technical_indicators"] = "akshare"
+        # tool_vendors stays {} (set by baseline)
 
     elif market == Market.HK:
-        # Per-method overrides only for the two HK-supported endpoints.
-        # Do NOT touch data_vendors (yfinance remains default for all categories).
-        tool_overrides = dict(config.get("tool_vendors") or {})
-        tool_overrides["get_stock_data"] = "akshare"
-        tool_overrides["get_fundamentals"] = "akshare"
-        config["tool_vendors"] = tool_overrides
+        # data_vendors stays at yfinance defaults (set by baseline).
+        # Per-method overrides only for the two HK-supported endpoints:
+        config["tool_vendors"]["get_stock_data"] = "akshare"
+        config["tool_vendors"]["get_fundamentals"] = "akshare"
 
-    # else: US, CRYPTO — no-op
+    # else: US, CRYPTO — baseline already set clean defaults; nothing more to do.

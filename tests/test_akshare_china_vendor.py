@@ -647,3 +647,35 @@ class TestGetIndicators:
         call_kwargs = fake_ak.stock_zh_a_daily.call_args[1]
         assert call_kwargs["symbol"] == "sh600519"
         assert call_kwargs["adjust"] == "qfq"
+
+
+# ---------------------------------------------------------------------------
+# Bad-schema / schema-drift tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_a_share_get_stock_data_bad_schema_returns_error_string():
+    """If akshare returns a DataFrame with completely wrong columns (schema drift),
+    get_stock_data must return an error string, not raise KeyError.
+
+    Both eastmoney and Sina fallback return a bad-shape DataFrame.
+    """
+    import tradingagents.dataflows.akshare_china as _vendor_mod
+
+    fake_ak = MagicMock()
+    # Both sources return a DataFrame with unexpected column names
+    fake_ak.stock_zh_a_hist.return_value = pd.DataFrame({"foo": [1, 2], "bar": [3, 4]})
+    fake_ak.stock_zh_a_daily.return_value = pd.DataFrame({"baz": [1], "qux": [2]})
+
+    with patch(
+        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        # Must NOT raise KeyError; must return an error string
+        result = _vendor_mod.get_stock_data("600519", "2026-01-05", "2026-01-09")
+
+    assert isinstance(result, str), f"Expected str, got {type(result)}"
+    # Should be either an error or no-data message — not a crash
+    # (bad schema → rename is no-op → sort_values("Date") KeyError is now caught)
+    # The function must not raise
+    assert len(result) > 0

@@ -187,12 +187,19 @@ class TestGetFundamentals:
         assert "a-share" in lower or "a_share" in lower or "a share" in lower
 
     @pytest.mark.unit
-    def test_curr_date_accepted_and_ignored(self):
-        """curr_date parameter must be accepted without error."""
+    def test_curr_date_accepted_and_uses_most_recent_eligible_period(self):
+        """curr_date parameter is accepted and used to select the latest eligible period.
+
+        The fixture has periods 20260331, 20251231, 20250930 — all after 2024-09-30.
+        Use a curr_date after the latest period to confirm that when ALL periods are
+        eligible (curr_date >= max period), the result is normal.
+        """
         ak = _fake_ak_with_all()
         with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
-            result = _vendor_mod.get_fundamentals("600519", curr_date="2024-09-30")
+            # curr_date after all fixture periods → latest period 20260331 is used
+            result = _vendor_mod.get_fundamentals("600519", curr_date="2027-01-01")
         assert result.startswith("# Company Fundamentals for")
+        assert "# Latest period: 20260331" in result
 
     @pytest.mark.unit
     def test_skips_rows_with_blank_or_nan_values(self):
@@ -267,6 +274,70 @@ class TestGetFundamentals:
         assert isinstance(result, str)
         assert result.startswith("Error:"), f"Expected 'Error:...' string, got: {result!r}"
         # Must NOT raise — the test itself is the proof (no exception escaped).
+
+    @pytest.mark.unit
+    def test_get_fundamentals_a_share_filters_periods_by_curr_date(self):
+        """History-aware: period columns after curr_date must be excluded.
+
+        Mock has periods 20260331, 20251231, 20231231, 20230930.
+        With curr_date='2024-01-01', only 20231231 and 20230930 are eligible;
+        the output header must reference 20231231 (the max ≤ cutoff), NOT 20260331.
+        """
+        ak = MagicMock()
+        ak.stock_financial_abstract.return_value = pd.DataFrame({
+            "选项": ["常用指标", "常用指标"],
+            "指标": ["归母净利润", "ROE"],
+            "20260331": [1.0e10, 0.35],
+            "20251231": [0.9e10, 0.32],
+            "20231231": [0.8e10, 0.29],
+            "20230930": [0.75e10, 0.27],
+        })
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_fundamentals("600519", curr_date="2024-01-01")
+
+        assert result.startswith("# Company Fundamentals for")
+        # Latest period after filter must be 20231231, NOT 20260331
+        assert "# Latest period: 20231231" in result, (
+            f"Expected '# Latest period: 20231231', got:\n{result[:300]}"
+        )
+        assert "# Latest period: 20260331" not in result
+        assert "# Latest period: 20251231" not in result
+
+    @pytest.mark.unit
+    def test_get_fundamentals_a_share_no_filter_uses_absolute_max(self):
+        """curr_date=None: use absolute max period (existing behavior preserved)."""
+        ak = MagicMock()
+        ak.stock_financial_abstract.return_value = pd.DataFrame({
+            "选项": ["常用指标"],
+            "指标": ["ROE"],
+            "20260331": [0.35],
+            "20251231": [0.32],
+            "20231231": [0.29],
+        })
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_fundamentals("600519", curr_date=None)
+
+        assert "# Latest period: 20260331" in result
+
+    @pytest.mark.unit
+    def test_get_fundamentals_a_share_no_eligible_period_returns_no_data(self):
+        """All period columns are after curr_date → informative no-data string, never raise."""
+        ak = MagicMock()
+        ak.stock_financial_abstract.return_value = pd.DataFrame({
+            "选项": ["常用指标"],
+            "指标": ["ROE"],
+            "20260331": [0.35],
+            "20251231": [0.32],
+        })
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_fundamentals("600519", curr_date="2024-01-01")
+
+        assert isinstance(result, str)
+        # Must contain the "on or before" phrasing from the new no-data message
+        assert "on or before" in result
+        assert "2024-01-01" in result
+        assert "600519" in result
+        # Must NOT raise — test itself is the proof
 
 
 # ---------------------------------------------------------------------------

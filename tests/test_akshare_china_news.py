@@ -10,6 +10,7 @@ All tests are marked @pytest.mark.unit.
 from __future__ import annotations
 
 import copy
+import numpy as np
 import pytest
 import pandas as pd
 from datetime import datetime
@@ -463,6 +464,73 @@ class TestFailSafe:
             result = _vendor_mod.get_news("600519", START, END)
         # Article must appear in the output (within 2024-01-01 – 2024-01-31 range)
         assert "tz-test article" in result
+
+    @pytest.mark.unit
+    def test_get_news_endpoint_returns_list_returns_error_or_no_data(self):
+        """If akshare endpoint returns [] (a list, not DataFrame), get_news must
+        return a string (error or no-data), never raise AttributeError.
+        """
+        ak = MagicMock()
+        ak.stock_news_em.return_value = []  # list, not DataFrame
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_news("600519", START, END)
+        assert isinstance(result, str)
+        # Must not raise; should be a no-data or error string
+        assert len(result) > 0
+
+    @pytest.mark.unit
+    def test_get_news_endpoint_returns_nonempty_list_returns_error_string(self):
+        """If akshare endpoint returns a non-empty list, get_news returns an error string."""
+        ak = MagicMock()
+        ak.stock_news_em.return_value = [{"title": "foo"}]  # list with items
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_news("600519", START, END)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    @pytest.mark.unit
+    def test_get_news_skips_articles_with_nan_title(self):
+        """Articles with NaN in the title column must be skipped entirely.
+        The output must NOT contain '### nan' and must NOT raise.
+        Valid articles with real titles must still appear.
+        """
+        df = pd.DataFrame({
+            "新闻标题": ["Valid Title", np.nan, "Another Valid"],
+            "新闻内容": ["content1", "content2", "content3"],
+            "新闻摘要": ["summary1", "summary2", "summary3"],
+            "新闻链接": ["http://a.com", "http://b.com", "http://c.com"],
+            "文章来源": ["SRC1", "SRC2", "SRC3"],
+            "发布时间": ["2024-01-15 10:00:00"] * 3,
+        })
+        ak = _fake_ak(df)
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_news("600519", START, END)
+        # Valid articles must be present
+        assert "### Valid Title (source: SRC1)" in result
+        assert "### Another Valid (source: SRC3)" in result
+        # NaN title article must be completely absent
+        assert "### nan" not in result
+        assert "nan" not in [line.split(" (source:")[0].strip("# ") for line in result.splitlines()
+                              if line.startswith("### ")]
+
+    @pytest.mark.unit
+    def test_get_news_publisher_nan_treated_as_empty_string(self):
+        """NaN in 文章来源 (publisher) must not produce 'source: nan' in output."""
+        df = pd.DataFrame({
+            "新闻标题": ["Article with NaN publisher"],
+            "新闻内容": ["content"],
+            "新闻摘要": ["summary"],
+            "新闻链接": [""],
+            "文章来源": [np.nan],
+            "发布时间": ["2024-01-15 10:00:00"],
+        })
+        ak = _fake_ak(df)
+        with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+            result = _vendor_mod.get_news("600519", START, END)
+        # Article must appear (has a valid title)
+        assert "Article with NaN publisher" in result
+        # Must not have literal 'nan' as the source
+        assert "(source: nan)" not in result
 
     @pytest.mark.unit
     def test_never_raises_under_any_input(self):
