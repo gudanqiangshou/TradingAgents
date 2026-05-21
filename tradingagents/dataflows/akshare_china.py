@@ -129,6 +129,21 @@ def _coerce_positive_int(value, name: str) -> "tuple[int | None, str | None]":
     return coerced, None
 
 
+def _eastmoney_a_share_symbol(code: str) -> str:
+    """Map a bare 6-digit A-share code to the prefixed form akshare's
+    eastmoney heat/keyword endpoints expect, e.g. '600519' -> 'SH600519'."""
+    code = code.strip()
+    if len(code) < 1:
+        return code.upper()
+    if code[:2] in ("60", "68", "90"):
+        return f"SH{code}"
+    if code[:2] in ("00", "30", "20"):
+        return f"SZ{code}"
+    if code[:1] in ("8", "4"):
+        return f"BJ{code}"
+    return f"SH{code}"  # safe default
+
+
 def _sina_prefix(code: str) -> str:
     """Return the Sina/akshare exchange prefix for a bare 6-digit A-share code.
 
@@ -1063,6 +1078,261 @@ def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days: 
         + _INDICATOR_CATALOG[indicator]
     )
     return result_str
+
+
+def get_social_sentiment(ticker: str) -> str:
+    """Retrieve retail social/attention signal for CN/HK markets via
+    eastmoney 个股热度. Returns a formatted multi-line string ready for
+    prompt injection. Fail-safe: never raises.
+
+    For A-share: per-stock historical rank from stock_hot_rank_detail_em,
+    plus associated hot concepts from stock_hot_keyword_em.
+    For HK: per-stock historical rank (no keywords; HK endpoint lacks).
+    For US/CRYPTO: returns a clear "not applicable" placeholder so the
+    caller can route to StockTwits instead.
+    """
+    market = resolve_market(ticker)
+
+    if market in (Market.US, Market.CRYPTO):
+        return (
+            "<social sentiment via this vendor is not applicable for non-CN/HK markets; "
+            "use StockTwits (US) instead>"
+        )
+
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: social sentiment data source unavailable ({exc})"
+
+    retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        if market == Market.A_SHARE:
+            code = ticker.strip().upper().split(".")[0]
+            prefixed = _eastmoney_a_share_symbol(code)
+
+            # --- Rank data ---
+            df_rank = None
+            try:
+                df_rank = ak.stock_hot_rank_detail_em(symbol=prefixed)
+            except Exception as exc:
+                logger.warning("stock_hot_rank_detail_em failed for %s: %s", prefixed, exc)
+
+            if _df_is_empty(df_rank):
+                return f"No retail attention rank data for {ticker}"
+
+            market_label = "A-share"
+            rank_col = "排名"
+            time_col = "时间"
+
+            # Sort ascending by time
+            try:
+                df_rank = df_rank.copy()
+                df_rank[time_col] = pd.to_datetime(df_rank[time_col], errors="coerce")
+                df_rank = df_rank.sort_values(time_col).reset_index(drop=True)
+            except Exception as exc:
+                logger.warning("rank df sort failed for %s: %s", ticker, exc)
+
+            latest_row = df_rank.iloc[-1]
+            latest_time = latest_row[time_col]
+            try:
+                current_rank = int(latest_row[rank_col])
+            except (ValueError, TypeError):
+                current_rank = latest_row[rank_col]
+
+            # New/loyal followers
+            new_followers = "N/A"
+            loyal_followers = "N/A"
+            ratio_str = "N/A"
+            try:
+                if "新晋粉丝" in df_rank.columns and "铁杆粉丝" in df_rank.columns:
+                    nf = latest_row.get("新晋粉丝", None)
+                    lf = latest_row.get("铁杆粉丝", None)
+                    new_followers = str(int(nf)) if nf is not None and not pd.isna(nf) else "N/A"
+                    loyal_followers = str(int(lf)) if lf is not None and not pd.isna(lf) else "N/A"
+                    if nf is not None and lf is not None and not pd.isna(nf) and not pd.isna(lf):
+                        lf_float = float(lf)
+                        ratio_str = f"{float(nf) / lf_float:.2f}" if lf_float != 0 else "inf"
+            except Exception as exc:
+                logger.warning("follower extraction failed for %s: %s", ticker, exc)
+
+            def _find_row_near(df, latest_dt, days_back):
+                target = latest_dt - pd.Timedelta(days=days_back)
+                try:
+                    idx = (df[time_col] - target).abs().idxmin()
+                    return df.loc[idx]
+                except Exception:
+                    return df.iloc[0]
+
+            def _trend_label(old_rank, cur_rank):
+                try:
+                    delta = int(old_rank) - int(cur_rank)
+                except (ValueError, TypeError):
+                    return "无法计算"
+                if abs(delta) <= 2:
+                    return f"无明显变化 (Δ~0)"
+                direction = "注意力上升" if delta > 0 else "注意力下降"
+                qualifier = "显著" if abs(delta) > 20 else ""
+                sign = "+" if delta > 0 else ""
+                return f"注意力{qualifier + ('上升' if delta > 0 else '下降')} (Δ{sign}{delta})"
+
+            latest_dt = latest_row[time_col]
+            enough_history_7 = len(df_rank) >= 2
+            enough_history_30 = len(df_rank) >= 2
+
+            row_7d = _find_row_near(df_rank, latest_dt, 7)
+            try:
+                rank_7d = int(row_7d[rank_col])
+                time_7d = row_7d[time_col]
+            except Exception:
+                rank_7d = row_7d[rank_col]
+                time_7d = row_7d[time_col]
+
+            row_30d = _find_row_near(df_rank, latest_dt, 30)
+            try:
+                rank_30d = int(row_30d[rank_col])
+                time_30d = row_30d[time_col]
+            except Exception:
+                rank_30d = row_30d[rank_col]
+                time_30d = row_30d[time_col]
+
+            trend_7d = _trend_label(rank_7d, current_rank)
+            trend_30d = _trend_label(rank_30d, current_rank)
+
+            # --- Keywords ---
+            keywords_block = ""
+            try:
+                df_kw = ak.stock_hot_keyword_em(symbol=prefixed)
+                if not _df_is_empty(df_kw) and "概念名称" in df_kw.columns and "热度" in df_kw.columns:
+                    try:
+                        df_kw = df_kw.copy()
+                        df_kw["热度"] = pd.to_numeric(df_kw["热度"], errors="coerce")
+                        df_kw = df_kw.sort_values("热度", ascending=False).head(5)
+                        kw_lines = []
+                        for i, (_, krow) in enumerate(df_kw.iterrows(), 1):
+                            name = str(krow["概念名称"]).strip()
+                            heat = krow["热度"]
+                            heat_str = f"{int(heat)}" if not pd.isna(heat) else "N/A"
+                            kw_lines.append(f"{i}. {name} (heat: {heat_str})")
+                        if kw_lines:
+                            keywords_block = (
+                                f"\n## Associated hot concepts (top {len(kw_lines)} by heat)\n"
+                                + "\n".join(kw_lines)
+                                + "\n"
+                            )
+                    except Exception as exc:
+                        logger.warning("keyword formatting failed for %s: %s", ticker, exc)
+            except Exception as exc:
+                logger.warning("stock_hot_keyword_em failed for %s: %s", prefixed, exc)
+
+            output = (
+                f"# Social sentiment for {ticker} ({market_label}, via Eastmoney 股吧)\n"
+                f"# Retrieved at: {retrieved_at}\n"
+                f"\n"
+                f"## Retail attention rank (lower number = more retail attention)\n"
+                f"- Current: rank #{current_rank} (as of {latest_time})\n"
+                f"- ~7 days ago: rank #{rank_7d} (as of {time_7d}) → {trend_7d}\n"
+                f"- ~30 days ago: rank #{rank_30d} (as of {time_30d}) → {trend_30d}\n"
+                f"\n"
+                f"## Follower composition (most recent snapshot)\n"
+                f"- 新晋粉丝 (new followers in latest window): {new_followers}\n"
+                f"- 铁杆粉丝 (loyal/long-term followers): {loyal_followers}\n"
+                f"- new/loyal ratio: {ratio_str} (low = stable interest; high = speculative influx)\n"
+                + keywords_block
+                + "\n"
+                "Interpretation guide for the agent:\n"
+                "- Rank rising (smaller number over time) = more retail attention; falling = less.\n"
+                "- High new/loyal ratio = recent speculative buying interest; low ratio = stable institutional or long-term retail.\n"
+                "- Hot concepts reveal which themes are driving the attention.\n"
+            )
+            return output
+
+        else:  # HK
+            raw = ticker.strip().upper()
+            if raw.endswith(".HK"):
+                raw = raw[:-3]
+            code5 = raw.zfill(5)
+
+            df_rank = None
+            try:
+                df_rank = ak.stock_hk_hot_rank_detail_em(symbol=code5)
+            except Exception as exc:
+                logger.warning("stock_hk_hot_rank_detail_em failed for %s: %s", code5, exc)
+
+            if _df_is_empty(df_rank):
+                return f"No retail attention rank data for {ticker}"
+
+            rank_col = "排名"
+            time_col = "时间"
+
+            try:
+                df_rank = df_rank.copy()
+                df_rank[time_col] = pd.to_datetime(df_rank[time_col], errors="coerce")
+                df_rank = df_rank.sort_values(time_col).reset_index(drop=True)
+            except Exception as exc:
+                logger.warning("HK rank df sort failed for %s: %s", ticker, exc)
+
+            latest_row = df_rank.iloc[-1]
+            latest_time = latest_row[time_col]
+            try:
+                current_rank = int(latest_row[rank_col])
+            except (ValueError, TypeError):
+                current_rank = latest_row[rank_col]
+
+            def _find_row_near_hk(df, latest_dt, days_back):
+                target = latest_dt - pd.Timedelta(days=days_back)
+                try:
+                    idx = (df[time_col] - target).abs().idxmin()
+                    return df.loc[idx]
+                except Exception:
+                    return df.iloc[0]
+
+            def _trend_label_hk(old_rank, cur_rank):
+                try:
+                    delta = int(old_rank) - int(cur_rank)
+                except (ValueError, TypeError):
+                    return "无法计算"
+                if abs(delta) <= 2:
+                    return f"无明显变化 (Δ~0)"
+                sign = "+" if delta > 0 else ""
+                qualifier = "显著" if abs(delta) > 20 else ""
+                return f"注意力{qualifier + ('上升' if delta > 0 else '下降')} (Δ{sign}{delta})"
+
+            latest_dt = latest_row[time_col]
+            row_7d = _find_row_near_hk(df_rank, latest_dt, 7)
+            try:
+                rank_7d = int(row_7d[rank_col])
+                time_7d = row_7d[time_col]
+            except Exception:
+                rank_7d = row_7d[rank_col]
+                time_7d = row_7d[time_col]
+
+            row_30d = _find_row_near_hk(df_rank, latest_dt, 30)
+            try:
+                rank_30d = int(row_30d[rank_col])
+                time_30d = row_30d[time_col]
+            except Exception:
+                rank_30d = row_30d[rank_col]
+                time_30d = row_30d[time_col]
+
+            trend_7d = _trend_label_hk(rank_7d, current_rank)
+            trend_30d = _trend_label_hk(rank_30d, current_rank)
+
+            output = (
+                f"# Social sentiment for {ticker} (HK, via Eastmoney 股吧)\n"
+                f"# Retrieved at: {retrieved_at}\n"
+                f"\n"
+                f"## Retail attention rank (lower = more attention)\n"
+                f"- Current: rank #{current_rank} (as of {latest_time})\n"
+                f"- ~7 days ago: rank #{rank_7d}  → {trend_7d}\n"
+                f"- ~30 days ago: rank #{rank_30d} → {trend_30d}\n"
+                f"\n"
+                "(HK eastmoney endpoint provides rank only; no follower composition or concept keywords.)\n"
+            )
+            return output
+
+    except Exception as exc:
+        return f"Error: unexpected social sentiment response for {ticker}: {exc}"
 
 
 def _strip_akshare_from_chain(value: str, default: str) -> str:

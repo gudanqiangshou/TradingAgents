@@ -29,6 +29,8 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
+from tradingagents.market_resolver import resolve_market, Market
+from tradingagents.dataflows.akshare_china import get_social_sentiment
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -49,12 +51,28 @@ def create_sentiment_analyst(llm):
         start_date = _seven_days_back(end_date)
         instrument_context = build_instrument_context(ticker)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
+        # Pre-fetch all sources. Each fetcher degrades gracefully and
         # returns a string (no exceptions surface from here), so the LLM
         # always sees something — either real data or a clear placeholder.
         news_block = get_news.func(ticker, start_date, end_date)
-        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
         reddit_block = fetch_reddit_posts(ticker)
+
+        # Route social sentiment by market: StockTwits (US equities only) vs
+        # Eastmoney 个股热度 (A-share / HK).  Both blocks are always passed to
+        # the prompt template; the unused one carries an informative placeholder.
+        _market = resolve_market(ticker)
+        if _market in (Market.A_SHARE, Market.HK):
+            stocktwits_block = (
+                "<stocktwits not queried: ticker is a non-US listing "
+                "(A-share / HK); CN/HK retail signal is in the eastmoney_social_block below>"
+            )
+            eastmoney_social_block = get_social_sentiment(ticker)
+        else:
+            stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
+            eastmoney_social_block = (
+                "<eastmoney social not queried: ticker is a non-CN/HK listing; "
+                "US/crypto retail signal is in the stocktwits_block above>"
+            )
 
         system_message = _build_system_message(
             ticker=ticker,
@@ -63,6 +81,7 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            eastmoney_social_block=eastmoney_social_block,
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -104,6 +123,7 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    eastmoney_social_block: str,
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
@@ -123,6 +143,14 @@ Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish /
 <start_of_stocktwits>
 {stocktwits_block}
 <end_of_stocktwits>
+
+### Eastmoney 股吧 retail attention — CN-mainland & HK retail social signal
+(active when ticker is A-share or HK; eastmoney 个股热度 ranks stocks by retail
+discussion volume on the Eastmoney 股吧 platform — the closest CN equivalent to
+StockTwits. Lower rank number = more retail attention.)
+<start_of_eastmoney_social>
+{eastmoney_social_block}
+<end_of_eastmoney_social>
 
 ### Reddit posts — r/wallstreetbets, r/stocks, r/investing (past 7 days)
 Community discussion. Engagement signal via upvote score and comment count. Subreddit character matters (r/wallstreetbets is often contrarian/exuberant; r/stocks more measured; r/investing longer-term).
@@ -148,6 +176,8 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 7. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
 
 8. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+
+9. **When the eastmoney_social_block contains a Retail attention rank section (i.e., the ticker is A-share or HK), use the rank-direction signal: rising attention often precedes price moves both ways; combine with news to judge whether the attention is positive or negative narrative.**
 
 ## Output
 

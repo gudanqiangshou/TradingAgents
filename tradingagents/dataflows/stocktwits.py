@@ -34,13 +34,26 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     Returns a placeholder string when the endpoint is unreachable, the
     symbol has no messages, or the response shape is unexpected — the
     caller never has to special-case None or exceptions.
+
+    HTTP 404 is handled distinctly: StockTwits only covers US equities, so
+    A-share and HK symbols routinely return 404.  The returned placeholder
+    makes this clear so the LLM agent does not treat it as an outage.
     """
     url = _API.format(ticker=ticker.upper())
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
-    except (HTTPError, URLError, json.JSONDecodeError, TimeoutError) as exc:
+    except HTTPError as exc:
+        if exc.code == 404:
+            return (
+                f"<stocktwits has no data for {ticker.upper()}: symbol not in their "
+                "US-equity database (StockTwits covers US equities only; "
+                "A-share / HK symbols routinely 404)>"
+            )
+        logger.warning("StockTwits HTTP %s for %s", exc.code, ticker)
+        return f"<stocktwits unavailable: HTTP {exc.code}>"
+    except (URLError, json.JSONDecodeError, TimeoutError) as exc:
         logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
         return f"<stocktwits unavailable: {type(exc).__name__}>"
 
