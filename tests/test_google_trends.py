@@ -157,3 +157,41 @@ def test_pytrends_returns_none():
 
     assert isinstance(result, str)
     assert "No Google Trends data found" in result
+
+
+@pytest.mark.unit
+def test_pytrends_returns_df_without_ticker_column():
+    """interest_over_time returns df without AAPL column → error string mentioning no column; no raise."""
+    dates = pd.date_range(start="2026-04-27", periods=31, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {"other_ticker": [50] * 31, "isPartial": [False] * 31},
+        index=dates,
+    )
+    mock_pt = MagicMock()
+    mock_pt.interest_over_time.return_value = df
+
+    with _patch_trendreq(mock_pt):
+        result = get_google_trends("AAPL")
+
+    assert isinstance(result, str)
+    # Should mention no column found for AAPL
+    assert "no Google Trends data column" in result.lower() or "No Google Trends data column" in result
+
+
+@pytest.mark.unit
+def test_pytrends_all_zero_series_returns_stable_trend():
+    """interest_over_time returns df where ticker column is all zeros →
+    trend = stable; no crash on zero-division."""
+    dates = pd.date_range(start="2026-04-27", periods=31, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {"AAPL": [0] * 31, "isPartial": [False] * 31},
+        index=dates,
+    )
+    mock_pt = MagicMock()
+    mock_pt.interest_over_time.return_value = df
+
+    with _patch_trendreq(mock_pt):
+        result = get_google_trends("AAPL")
+
+    assert isinstance(result, str)
+    assert "trend = stable" in result

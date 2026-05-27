@@ -109,3 +109,53 @@ def test_zt_pool_endpoint_raises_returns_error():
 
     assert isinstance(result, str)
     assert result.startswith("Error")
+
+
+# ---------------------------------------------------------------------------
+# _validate_date_str — strptime-based rejection tests (Critical 1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_date", [
+    "invalid-date",
+    "2024/01/01",
+    "20240101",
+    "2024-13-01",   # invalid month
+    "2024-01-32",   # invalid day
+    "",
+])
+def test_validate_date_str_rejects_wrong_format(bad_date):
+    """_validate_date_str with strptime: all bad formats return Error strings."""
+    result = _vendor_mod._validate_date_str(bad_date, "curr_date")
+    assert result is not None
+    assert isinstance(result, str)
+    assert "Error" in result
+
+
+@pytest.mark.unit
+def test_validate_date_str_accepts_valid_date():
+    """_validate_date_str: '2024-01-02' returns None (valid)."""
+    result = _vendor_mod._validate_date_str("2024-01-02", "curr_date")
+    assert result is None
+
+
+@pytest.mark.unit
+def test_get_zt_pool_summary_rejects_invalid_date_string():
+    """'invalid-date' → Error string; akshare NOT called."""
+    ak = MagicMock()
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result = _vendor_mod.get_zt_pool_summary("invalid-date")
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+    ak.stock_zt_pool_em.assert_not_called()
+
+
+@pytest.mark.unit
+def test_get_zt_pool_summary_rejects_slash_date_format():
+    """'2024/01/01' → Error string; akshare NOT called."""
+    ak = MagicMock()
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result = _vendor_mod.get_zt_pool_summary("2024/01/01")
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+    ak.stock_zt_pool_em.assert_not_called()

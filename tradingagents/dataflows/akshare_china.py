@@ -110,13 +110,17 @@ _INDICATOR_CATALOG: dict[str, str] = {
 
 
 def _validate_date_str(value, name: str) -> "str | None":
-    """Return None if `value` looks like a YYYY-MM-DD string; otherwise an
-    informative error message string (the vendor's never-raises convention)."""
+    """Return None if value is a valid 'yyyy-mm-dd' string; otherwise an
+    informative error message string (vendor never-raises convention).
+    Uses strptime to actually parse the date, not a length heuristic."""
     if not isinstance(value, str) or not value.strip():
         return f"Error: {name} must be a 'yyyy-mm-dd' string, got {type(value).__name__}: {value!r}"
-    # Cheap shape check — full parse already done later if shape matches.
-    if len(value.strip()) < 8 or len(value.strip()) > 12:
-        return f"Error: {name}={value!r} does not look like a date"
+    s = value.strip()
+    try:
+        from datetime import datetime
+        datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        return f"Error: {name}={value!r} is not a valid yyyy-mm-dd date"
     return None
 
 
@@ -1100,6 +1104,10 @@ def get_social_sentiment(ticker: str) -> str:
     For US/CRYPTO: returns a clear "not applicable" placeholder so the
     caller can route to StockTwits instead.
     """
+    # Input type-guard (vendor never-raises contract):
+    if not isinstance(ticker, str) or not ticker.strip():
+        return f"Error: ticker must be a non-empty str, got {type(ticker).__name__}: {ticker!r}"
+
     market = resolve_market(ticker)
 
     if market in (Market.US, Market.CRYPTO):
@@ -1579,9 +1587,16 @@ def get_lhb_summary(ticker: str, curr_date: str, days_back: int = 5) -> str:
     str
         Formatted plaintext. Fail-safe: never raises.
     """
+    # Input type-guards (vendor never-raises contract):
+    if not isinstance(ticker, str) or not ticker.strip():
+        return f"Error: ticker must be a non-empty str, got {type(ticker).__name__}: {ticker!r}"
     err = _validate_date_str(curr_date, "curr_date")
     if err:
         return err
+    coerced, coerce_err = _coerce_positive_int(days_back, "days_back")
+    if coerce_err:
+        return coerce_err
+    days_back = coerced
 
     try:
         curr_date_dt = datetime.strptime(curr_date.strip(), "%Y-%m-%d")
@@ -1694,28 +1709,37 @@ def get_lhb_summary(ticker: str, curr_date: str, days_back: int = 5) -> str:
 # D. 雪球 attention (with thread-safe TTL cache)
 # ---------------------------------------------------------------------------
 
-def _get_xueqiu_cached(symbol: str, ak) -> "pd.DataFrame | None":
-    """Fetch and cache 雪球 data with TTL. Thread-safe."""
-    now = _time.monotonic()
+def _get_xueqiu_cached(symbol: str) -> "pd.DataFrame | None":
+    """Return cached or freshly-fetched xueqiu df for symbol ('最热门'|'本周新增').
+    Returns DataFrame on success, None on failure. Failures are NOT cached so
+    a transient network error doesn't poison the 10-min TTL window.
+    Single-flight: with the lock held during fetch, concurrent callers wait
+    rather than triggering a stampede.
+
+    Trade-off: holding the lock during the ~18s fetch means concurrent callers
+    for the same symbol block. For 最热门 + 本周新增 called in sequence, worst
+    case is ~36s wait for concurrent callers. This is acceptable in a
+    1-task-concurrency production web context.
+    """
+    import time as _t
     with _XUEQIU_CACHE_LOCK:
-        entry = _XUEQIU_CACHE.get(symbol)
-        if entry is not None:
-            cached_at, df = entry
-            if (now - cached_at) < _XUEQIU_CACHE_TTL:
+        # First check inside lock
+        if symbol in _XUEQIU_CACHE:
+            cached_at, df = _XUEQIU_CACHE[symbol]
+            if _t.time() - cached_at < _XUEQIU_CACHE_TTL:
                 return df
-
-    # Fetch outside the lock so we don't block other threads for 18s
-    try:
-        df = ak.stock_hot_tweet_xq(symbol=symbol)
-        if not isinstance(df, pd.DataFrame):
-            df = None
-    except Exception as exc:
-        logger.warning("stock_hot_tweet_xq(%s) failed: %s", symbol, exc)
-        df = None
-
-    with _XUEQIU_CACHE_LOCK:
-        _XUEQIU_CACHE[symbol] = (_time.monotonic(), df)
-    return df
+        # Cache miss or expired — fetch INSIDE lock so concurrent callers wait
+        try:
+            ak = _dep_bootstrap.ensure("akshare")
+            df = ak.stock_hot_tweet_xq(symbol=symbol)
+        except Exception as exc:
+            logger.warning("xueqiu fetch %s failed: %s", symbol, exc)
+            return None  # do NOT cache failures
+        # Only cache successful fetches
+        if isinstance(df, pd.DataFrame):
+            _XUEQIU_CACHE[symbol] = (_t.time(), df)
+            return df
+        return None
 
 
 def get_xueqiu_attention(ticker: str) -> str:
@@ -1732,6 +1756,10 @@ def get_xueqiu_attention(ticker: str) -> str:
         Formatted plaintext. Fail-safe: never raises.
         Non-A-share tickers return a "not applicable" placeholder.
     """
+    # Input type-guard (vendor never-raises contract):
+    if not isinstance(ticker, str) or not ticker.strip():
+        return f"Error: ticker must be a non-empty str, got {type(ticker).__name__}: {ticker!r}"
+
     market = resolve_market(ticker)
 
     if market not in (Market.A_SHARE,):
@@ -1741,13 +1769,8 @@ def get_xueqiu_attention(ticker: str) -> str:
     prefixed = _eastmoney_a_share_symbol(code)  # SH600519 / SZ000001 etc.
 
     try:
-        ak = _dep_bootstrap.ensure("akshare")
-    except _dep_bootstrap.DependencyUnavailable as exc:
-        return f"Error: A-share data source unavailable ({exc})"
-
-    try:
-        df_hot = _get_xueqiu_cached("最热门", ak)
-        df_weekly = _get_xueqiu_cached("本周新增", ak)
+        df_hot = _get_xueqiu_cached("最热门")
+        df_weekly = _get_xueqiu_cached("本周新增")
     except Exception as exc:
         return f"Error: failed to fetch 雪球 attention: {type(exc).__name__}: {str(exc)[:120]}"
 

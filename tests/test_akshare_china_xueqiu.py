@@ -164,3 +164,113 @@ def test_xueqiu_endpoint_returns_list():
     assert isinstance(result, str)
     # Non-DataFrame → None from cache helper → "No 雪球 attention data" or Error
     assert "No 雪球 attention data" in result or result.startswith("Error")
+
+
+# ---------------------------------------------------------------------------
+# Type-guard tests for ticker (Critical 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_xueqiu_none_ticker_returns_error_string():
+    """ticker=None → Error string, no raise."""
+    result = _vendor_mod.get_xueqiu_attention(None)
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+
+
+@pytest.mark.unit
+def test_xueqiu_bool_ticker_returns_error_string():
+    """ticker=True → Error string, no raise."""
+    result = _vendor_mod.get_xueqiu_attention(True)
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_ticker", ["", "   "])
+def test_xueqiu_empty_ticker_returns_error_string(bad_ticker):
+    """Empty or whitespace ticker → Error string, no raise."""
+    result = _vendor_mod.get_xueqiu_attention(bad_ticker)
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+
+
+# ---------------------------------------------------------------------------
+# Xueqiu DCL single-flight and failure-no-cache tests (Important 1 + 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_concurrent_cold_start_single_flight():
+    """4 threads calling get_xueqiu_attention simultaneously (cold cache) →
+    stock_hot_tweet_xq called exactly 2 times (one per symbol type), not 8."""
+    import threading
+
+    df = _make_xueqiu_df(include_code="SH600519")
+    call_count = [0]
+    original_lock = threading.Lock()
+
+    def slow_fetch(symbol):
+        """Simulate a slow akshare fetch (0.1s) and count calls."""
+        import time
+        with original_lock:
+            call_count[0] += 1
+        time.sleep(0.1)
+        return df
+
+    ak = MagicMock()
+    ak.stock_hot_tweet_xq.side_effect = slow_fetch
+
+    results = []
+    errors = []
+
+    def worker():
+        try:
+            with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+                result = _vendor_mod.get_xueqiu_attention("600519")
+                results.append(result)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"Workers raised exceptions: {errors}"
+    assert len(results) == 4
+    # DCL ensures only 2 fetches (one for 最热门, one for 本周新增) regardless of concurrency
+    assert ak.stock_hot_tweet_xq.call_count == 2, (
+        f"Expected 2 calls (single-flight), got {ak.stock_hot_tweet_xq.call_count}"
+    )
+
+
+@pytest.mark.unit
+def test_failure_not_cached_retries_next_call():
+    """First call → ConnectionError → returns no-data string;
+    second call → valid df → returns proper attention string.
+    Mock called 4 times total (2 per call × 2 calls)."""
+    df = _make_xueqiu_df(include_code="SH600519")
+    call_count = [0]
+
+    def side_effect(symbol):
+        call_count[0] += 1
+        if call_count[0] <= 2:
+            raise ConnectionError("transient network error")
+        return df
+
+    ak = MagicMock()
+    ak.stock_hot_tweet_xq.side_effect = side_effect
+
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result1 = _vendor_mod.get_xueqiu_attention("600519")
+        result2 = _vendor_mod.get_xueqiu_attention("600519")
+
+    # First call: failures not cached → no-data string
+    assert "No 雪球 attention data" in result1 or result1.startswith("Error")
+    # Second call: mock now returns valid df → success
+    assert "雪球 attention for 600519" in result2
+    # Total calls: 2 for first call (both fail), 2 for second call (both succeed)
+    assert ak.stock_hot_tweet_xq.call_count == 4, (
+        f"Expected 4 calls total, got {ak.stock_hot_tweet_xq.call_count}"
+    )

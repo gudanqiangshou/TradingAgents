@@ -271,3 +271,25 @@ class TestInvalidTicker:
                 assert len(result) > 0
             except Exception as exc:
                 pytest.fail(f"get_social_sentiment raised for ticker={bad_ticker!r}: {exc}")
+
+    @pytest.mark.unit
+    def test_none_ticker_returns_error_string(self):
+        """ticker=None → Error string, no raise."""
+        result = _vendor_mod.get_social_sentiment(None)
+        assert isinstance(result, str)
+        assert result.startswith("Error")
+
+    @pytest.mark.unit
+    def test_bool_ticker_returns_error_string(self):
+        """ticker=True → Error string, no raise."""
+        result = _vendor_mod.get_social_sentiment(True)
+        assert isinstance(result, str)
+        assert result.startswith("Error")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_ticker", ["", "   "])
+    def test_empty_ticker_returns_error_string(self, bad_ticker):
+        """Empty or whitespace ticker → Error string, no raise."""
+        result = _vendor_mod.get_social_sentiment(bad_ticker)
+        assert isinstance(result, str)
+        assert result.startswith("Error")

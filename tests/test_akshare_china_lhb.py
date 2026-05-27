@@ -129,3 +129,66 @@ def test_lhb_list_return():
 
     assert isinstance(result, str)
     assert "No 龙虎榜 data" in result or result.startswith("Error")
+
+
+# ---------------------------------------------------------------------------
+# Type-guard tests for ticker (Critical 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_lhb_none_ticker_returns_error_string():
+    """ticker=None → Error string, no raise."""
+    result = _vendor_mod.get_lhb_summary(None, "2026-05-27")
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+
+
+@pytest.mark.unit
+def test_lhb_bool_ticker_returns_error_string():
+    """ticker=True → Error string, no raise."""
+    result = _vendor_mod.get_lhb_summary(True, "2026-05-27")
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_ticker", ["", "   "])
+def test_lhb_empty_ticker_returns_error_string(bad_ticker):
+    """Empty or whitespace ticker → Error string, no raise."""
+    result = _vendor_mod.get_lhb_summary(bad_ticker, "2026-05-27")
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+
+
+# ---------------------------------------------------------------------------
+# days_back coercion/rejection tests (Critical 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_lhb_string_days_back_coerced():
+    """days_back='5' → coerced via _coerce_positive_int; call succeeds."""
+    df = _make_lhb_df(include_600519=True)
+    ak = MagicMock()
+    ak.stock_lhb_detail_em.return_value = df
+
+    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
+        result = _vendor_mod.get_lhb_summary("600519", "2026-05-27", days_back="5")
+
+    assert isinstance(result, str)
+    assert "龙虎榜" in result
+
+
+@pytest.mark.unit
+def test_lhb_inf_days_back_returns_error_string():
+    """days_back=float('inf') → Error string, no raise."""
+    result = _vendor_mod.get_lhb_summary("600519", "2026-05-27", days_back=float("inf"))
+    assert isinstance(result, str)
+    assert result.startswith("Error")
+
+
+@pytest.mark.unit
+def test_lhb_negative_days_back_returns_error_string():
+    """days_back=-3 → Error string, no raise."""
+    result = _vendor_mod.get_lhb_summary("600519", "2026-05-27", days_back=-3)
+    assert isinstance(result, str)
+    assert result.startswith("Error")

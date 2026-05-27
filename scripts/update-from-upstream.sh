@@ -46,8 +46,29 @@ if ! git merge --no-edit upstream/main; then
      already-done merge and continue from the tests."
 fi
 
-say "4/6 Running safety tests (web port + your CLI customization)"
-if ! "$PY" -m pytest tests/web/ tests/test_cli_backend_url_override.py -q; then
+say "4/6 Running safety tests (web port + your CLI customization + dataflow integrations)"
+if ! "$PY" -m pytest \
+    tests/web/ \
+    tests/test_cli_backend_url_override.py \
+    tests/test_dataflows_config.py \
+    tests/test_market_resolver.py \
+    tests/test_dep_bootstrap.py \
+    tests/test_akshare_china_vendor.py \
+    tests/test_akshare_china_financials.py \
+    tests/test_akshare_china_news.py \
+    tests/test_akshare_china_hk.py \
+    tests/test_akshare_china_social.py \
+    tests/test_akshare_china_zt_pool.py \
+    tests/test_akshare_china_hot_up.py \
+    tests/test_akshare_china_lhb.py \
+    tests/test_akshare_china_xueqiu.py \
+    tests/test_google_trends.py \
+    tests/test_akshare_routing_overlay.py \
+    tests/test_crypto_asset_mode.py \
+    tests/test_ticker_symbol_handling.py \
+    tests/test_stocktwits.py \
+    tests/test_sentiment_analyst_routing.py \
+    -q; then
   die "Tests FAILED against the new upstream. The merge is in your working
      tree but NOT pushed and the live site was NOT restarted. Investigate:
      upstream may have changed cli/main.py streaming logic that web/
