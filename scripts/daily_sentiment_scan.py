@@ -8,7 +8,7 @@ Usage:
     python scripts/daily_sentiment_scan.py [--date YYYY-MM-DD] [--no-feishu]
 
 Designed for daily cron / LaunchAgent invocation. Every section is
-fail-isolated: a failure in one source produces an inline "(unavailable: ...)"
+fail-isolated: a failure in one source produces an inline "(暂不可用： ...)"
 placeholder but does NOT block the other sections.
 """
 
@@ -40,7 +40,7 @@ def section_a_hot_up_rank() -> str:
     try:
         return get_hot_up_rank()
     except Exception as exc:
-        return f"(unavailable: {type(exc).__name__}: {str(exc)[:120]})"
+        return f"(暂不可用： {type(exc).__name__}: {str(exc)[:120]})"
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ def section_b_lhb_top5(curr_date: str) -> str:
             end_date=end_dt.strftime("%Y%m%d"),
         )
         if not isinstance(df, pd.DataFrame) or df.empty:
-            return "🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n\n(no data)"
+            return "🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n\n(无数据)"
         # Find columns
         net_col = next(
             (c for c in df.columns if "净买额" in c or "净买入" in c),
@@ -127,14 +127,14 @@ def section_b_lhb_top5(curr_date: str) -> str:
             + "\n".join(rows)
         )
     except Exception as exc:
-        return f"🐂 A股 龙虎榜\n\n(unavailable: {type(exc).__name__}: {str(exc)[:100]})"
+        return f"🐂 A股 龙虎榜\n\n(暂不可用： {type(exc).__name__}: {str(exc)[:100]})"
 
 
 # ---------------------------------------------------------------------------
 # Section C — 雪球飙升榜 (rank delta signal)
 # ---------------------------------------------------------------------------
 
-def section_c_xueqiu_surge_top15() -> str:
+def section_c_xueqiu_surge() -> str:
     """雪球飙升榜 — 计算 "本周新增" rank vs "最热门" rank 的差值，挑出新晋飙升股。
     一只股票在 本周新增 排名靠前但在 累计最热门 排名靠后 = 散户突然涌入讨论 = 雪球版 attention spike。
     """
@@ -142,14 +142,14 @@ def section_c_xueqiu_surge_top15() -> str:
         df_hot = _get_xueqiu_cached("最热门")
         df_weekly = _get_xueqiu_cached("本周新增")
         if _df_is_empty(df_hot) or _df_is_empty(df_weekly):
-            return "📈 雪球飙升榜\n(unavailable: xueqiu data not loaded)"
+            return "📈 雪球飙升榜\n(暂不可用： xueqiu data not loaded)"
 
         col_sym_hot = next((c for c in df_hot.columns if "代码" in c), None)
         col_sym_weekly = next((c for c in df_weekly.columns if "代码" in c), None)
         col_name = next((c for c in df_weekly.columns if "名称" in c or "简称" in c), None)
         col_follow = next((c for c in df_weekly.columns if "关注" in c), None)
         if not col_sym_hot or not col_sym_weekly:
-            return "📈 雪球飙升榜\n(unavailable: 代码 column not found)"
+            return "📈 雪球飙升榜\n(暂不可用： 代码 column not found)"
 
         # Build rank maps
         hot_rank = {row[col_sym_hot]: i + 1 for i, (_, row) in enumerate(df_hot.iterrows())}
@@ -180,7 +180,7 @@ def section_c_xueqiu_surge_top15() -> str:
             })
 
         surges.sort(key=lambda x: x["surge"], reverse=True)
-        top = surges[:15]
+        top = surges[:5]
 
         if not top:
             return "📈 雪球飙升榜 (无新晋飙升标的，老热门主导)"
@@ -199,11 +199,11 @@ def section_c_xueqiu_surge_top15() -> str:
             )
 
         return (
-            "📈 雪球飙升榜 — 散户讨论排名突然蹿升的新晋热门 Top 15\n"
+            "📈 雪球飙升榜 — 散户讨论排名突然蹿升的新晋热门 Top 5\n"
             + "\n".join(lines)
         )
     except Exception as exc:
-        return f"📈 雪球飙升榜\n(unavailable: {type(exc).__name__}: {str(exc)[:120]})"
+        return f"📈 雪球飙升榜\n(暂不可用： {type(exc).__name__}: {str(exc)[:120]})"
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +213,9 @@ def section_c_xueqiu_surge_top15() -> str:
 def section_d_stocktwits_trending() -> str:
     """StockTwits Trending Top 10 — 美股 attention discovery."""
     try:
-        return fetch_stocktwits_trending(limit=10)
+        return fetch_stocktwits_trending(limit=5)
     except Exception as exc:
-        return f"(unavailable: {type(exc).__name__}: {str(exc)[:120]})"
+        return f"(暂不可用： {type(exc).__name__}: {str(exc)[:120]})"
 
 
 # ---------------------------------------------------------------------------
@@ -232,15 +232,15 @@ def build_report(curr_date: str) -> str:
         "",
         section_b_lhb_top5(curr_date),
         "",
-        section_c_xueqiu_surge_top15(),
+        section_c_xueqiu_surge(),
         "",
         section_d_stocktwits_trending(),
         "",
-        "━━━ 📋 Cross-source 加权（30 秒决策）━━━",
+        "━━━ 📋 多源加权（30 秒决策）━━━",
         "• A股飙升榜 ∩ 龙虎榜机构买入 = 散户+机构同向 = 最强信号",
-        "• A股飙升榜 ∩ 雪球飙升榜 = 双 retail attention 验证 = 强信号",
+        "• A股飙升榜 ∩ 雪球飙升榜 = 双源散户关注度验证 = 强信号",
         "• A股飙升榜 ∩ 涨停板同板块 = 主题主升浪",
-        "• 美股 StockTwits trending → 配 Google Trends + StockTwits 个股 bull/bear",
+        "• 美股 StockTwits 热议榜 → 配 Google Trends + StockTwits 个股看多/看空",
     ]
     return "\n".join(sections)
 

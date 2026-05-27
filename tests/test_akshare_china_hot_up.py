@@ -67,7 +67,7 @@ def test_hot_up_happy_path():
         out = ac.get_hot_up_rank()
 
     assert "🚀" in out
-    assert "东方财富 attention 飙升榜" in out
+    assert "东方财富 关注度飙升榜" in out
     # Compact line format (no markdown table)
     assert "| -- |" not in out
     assert "🔥" in out
@@ -75,7 +75,7 @@ def test_hot_up_happy_path():
     assert "股票0" in out or "股票1" in out
     # % sign from formatted 涨跌幅
     assert "%" in out
-    assert "Interpretation" in out
+    assert "解读" in out
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +347,7 @@ def test_hot_up_retries_on_connection_error_then_succeeds():
         out = ac.get_hot_up_rank()
 
     assert "🚀" in out
-    assert "東方財富 attention 飙升榜" in out or "东方财富 attention 飙升榜" in out
+    assert "东方财富 关注度飙升榜" in out
     assert fake_session.post.call_count == 2
     # sleep was called once (backoff[0] = 0.5)
     mock_sleep.assert_called_once_with(0.5)

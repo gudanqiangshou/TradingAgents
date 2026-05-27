@@ -16,7 +16,7 @@ from scripts.daily_sentiment_scan import (
     build_report,
     section_a_hot_up_rank,
     section_b_lhb_top5,
-    section_c_xueqiu_surge_top15,
+    section_c_xueqiu_surge,
     section_d_stocktwits_trending,
     convert_to_feishu_post,
     main,
@@ -83,7 +83,7 @@ def test_build_report_all_sources_succeed():
     with (
         patch("scripts.daily_sentiment_scan.get_hot_up_rank", return_value="🚀 东方财富 attention 飙升榜 — Top 20\n🔥 SZ000001 平安银行 · 排名 #100 (飙升 +200 位) · +2.50%"),
         patch("scripts.daily_sentiment_scan.section_b_lhb_top5", return_value="🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n🐂 600519 贵州茅台 · 净买入 +5.00亿"),
-        patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge_top15", return_value="📈 雪球飙升榜 — 散户讨论排名突然蹿升的新晋热门 Top 15\n🔥 SH605066 天正电气 · 本周#5 vs 累计#300 (飙升 +295)"),
+        patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value="📈 雪球飙升榜 — 散户讨论排名突然蹿升的新晋热门 Top 15\n🔥 SH605066 天正电气 · 本周#5 vs 累计#300 (飙升 +295)"),
         patch("scripts.daily_sentiment_scan.fetch_stocktwits_trending", return_value="🇺🇸 StockTwits Trending Equities — Top 1 (retrieved 2026-05-27 09:00:00 UTC)\n1. AAPL NASDAQ · Apple Inc"),
     ):
         report = build_report("2026-05-27")
@@ -105,7 +105,7 @@ def test_build_report_one_source_fails_others_succeed():
     with (
         patch("scripts.daily_sentiment_scan.get_hot_up_rank", side_effect=RuntimeError("网络异常")),
         patch("scripts.daily_sentiment_scan.section_b_lhb_top5", return_value="🐂 A股 龙虎榜\n🐂 600519 贵州茅台"),
-        patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge_top15", return_value="📈 雪球飙升榜\n🔥 SH000001 平安银行"),
+        patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value="📈 雪球飙升榜\n🔥 SH000001 平安银行"),
         patch("scripts.daily_sentiment_scan.fetch_stocktwits_trending", return_value="🇺🇸 StockTwits Trending\n1. MSFT NASDAQ · Microsoft"),
     ):
         report = build_report("2026-05-27")
@@ -182,7 +182,7 @@ def test_xueqiu_surge_top15_computes_rank_delta():
         _XUEQIU_CACHE["最热门"] = (time.time(), df_hot)
         _XUEQIU_CACHE["本周新增"] = (time.time(), df_weekly)
     try:
-        result = section_c_xueqiu_surge_top15()
+        result = section_c_xueqiu_surge()
     finally:
         with _XUEQIU_CACHE_LOCK:
             _XUEQIU_CACHE.pop("最热门", None)
@@ -213,7 +213,7 @@ def test_xueqiu_surge_filters_megacaps():
         _XUEQIU_CACHE["最热门"] = (time.time(), df_hot)
         _XUEQIU_CACHE["本周新增"] = (time.time(), df_weekly)
     try:
-        result = section_c_xueqiu_surge_top15()
+        result = section_c_xueqiu_surge()
     finally:
         with _XUEQIU_CACHE_LOCK:
             _XUEQIU_CACHE.pop("最热门", None)
@@ -245,7 +245,7 @@ def test_xueqiu_surge_top15_sort_desc():
         _XUEQIU_CACHE["最热门"] = (time.time(), df_hot)
         _XUEQIU_CACHE["本周新增"] = (time.time(), df_weekly)
     try:
-        result = section_c_xueqiu_surge_top15()
+        result = section_c_xueqiu_surge()
     finally:
         with _XUEQIU_CACHE_LOCK:
             _XUEQIU_CACHE.pop("最热门", None)

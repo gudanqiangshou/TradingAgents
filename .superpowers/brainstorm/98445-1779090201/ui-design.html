@@ -1,0 +1,207 @@
+<h2>设计二：页面 UI 布局</h2>
+<p class="subtitle">完整页面结构，包含输入区、进度面板、报告面板三个核心区域</p>
+
+<div class="mockup">
+  <div class="mockup-header">完整页面预览（桌面端）</div>
+  <div class="mockup-body" style="background:#0a0c14;padding:0;overflow:hidden;border-radius:0 0 6px 6px">
+
+    <!-- Top Nav -->
+    <div style="background:#0f1117;border-bottom:1px solid #1e2235;padding:10px 20px;display:flex;align-items:center;justify-content:space-between">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:#7c85ff;font-size:16px">⬡</span>
+        <span style="color:#e2e8f0;font-size:13px;font-weight:bold">TradingAgents</span>
+        <span style="color:#374151;font-size:12px">|</span>
+        <span style="color:#6b7280;font-size:11px">多智能体金融分析</span>
+      </div>
+      <div style="color:#6b7280;font-size:10px">Powered by DeepSeek</div>
+    </div>
+
+    <!-- Input Bar -->
+    <div style="background:#0f1117;border-bottom:1px solid #1e2235;padding:12px 20px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <!-- Ticker input -->
+        <div style="display:flex;align-items:center;gap-6px;background:#1a1d2e;border:1px solid #374151;border-radius:6px;padding:0 12px;min-width:120px">
+          <span style="color:#6b7280;font-size:10px;margin-right:6px">代码</span>
+          <input style="background:transparent;border:none;outline:none;color:#e2e8f0;font-size:13px;font-family:monospace;width:80px;padding:8px 0" placeholder="TSLA" value="TSLA" readonly>
+        </div>
+        <!-- Date input -->
+        <div style="background:#1a1d2e;border:1px solid #374151;border-radius:6px;padding:8px 12px;color:#94a3b8;font-size:11px">
+          📅 2026-05-18
+        </div>
+        <!-- Analyst pills -->
+        <div style="display:flex;gap:5px;flex-wrap:wrap">
+          <span style="background:#7c85ff22;border:1px solid #7c85ff55;color:#a5b4ff;padding:4px 10px;border-radius:12px;font-size:10px">✓ 市场</span>
+          <span style="background:#7c85ff22;border:1px solid #7c85ff55;color:#a5b4ff;padding:4px 10px;border-radius:12px;font-size:10px">✓ 情绪</span>
+          <span style="background:#7c85ff22;border:1px solid #7c85ff55;color:#a5b4ff;padding:4px 10px;border-radius:12px;font-size:10px">✓ 新闻</span>
+          <span style="background:#7c85ff22;border:1px solid #7c85ff55;color:#a5b4ff;padding:4px 10px;border-radius:12px;font-size:10px">✓ 基本面</span>
+        </div>
+        <!-- Language select -->
+        <div style="background:#1a1d2e;border:1px solid #374151;border-radius:6px;padding:8px 12px;color:#94a3b8;font-size:11px">
+          🌐 中文 ▾
+        </div>
+        <!-- Submit -->
+        <div style="background:#7c85ff;color:#fff;border-radius:6px;padding:8px 20px;font-size:12px;font-weight:bold;cursor:pointer;white-space:nowrap">
+          开始分析
+        </div>
+      </div>
+    </div>
+
+    <!-- Main split panel -->
+    <div style="display:grid;grid-template-columns:220px 1fr;height:380px">
+
+      <!-- Left: Agent Progress -->
+      <div style="border-right:1px solid #1e2235;background:#0d0f1a;padding:12px;overflow-y:auto">
+        <div style="color:#6b7280;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">智能体进度</div>
+
+        <!-- Progress bar -->
+        <div style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+            <span style="color:#94a3b8;font-size:9px">总进度</span>
+            <span style="color:#7c85ff;font-size:9px">3/8</span>
+          </div>
+          <div style="background:#1e2235;border-radius:2px;height:3px">
+            <div style="background:linear-gradient(90deg,#7c85ff,#a5b4ff);width:37%;height:3px;border-radius:2px"></div>
+          </div>
+        </div>
+
+        <!-- Team: Analyst -->
+        <div style="margin-bottom:8px">
+          <div style="color:#6b7280;font-size:9px;margin-bottom:5px;padding-left:2px">分析师团队</div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;background:#12172a;border-radius:4px">
+              <span style="width:6px;height:6px;background:#22c55e;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+              <span style="color:#e2e8f0;font-size:10px">市场分析师</span>
+              <span style="margin-left:auto;color:#22c55e;font-size:9px">✓</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;background:#12172a;border-radius:4px">
+              <span style="width:6px;height:6px;background:#22c55e;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+              <span style="color:#e2e8f0;font-size:10px">情绪分析师</span>
+              <span style="margin-left:auto;color:#22c55e;font-size:9px">✓</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;background:#1a1d2e;border-radius:4px;border:1px solid #f59e0b33">
+              <span style="width:6px;height:6px;background:#f59e0b;border-radius:50%;display:inline-block;flex-shrink:0;animation:pulse 1s infinite"></span>
+              <span style="color:#fbbf24;font-size:10px">新闻分析师</span>
+              <span style="margin-left:auto;color:#f59e0b;font-size:9px">···</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:4px">
+              <span style="width:6px;height:6px;background:#374151;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+              <span style="color:#6b7280;font-size:10px">基本面分析师</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Team: Research -->
+        <div style="margin-bottom:8px">
+          <div style="color:#6b7280;font-size:9px;margin-bottom:5px;padding-left:2px">研究团队</div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:4px">
+              <span style="width:6px;height:6px;background:#374151;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+              <span style="color:#6b7280;font-size:10px">多头研究员</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:4px">
+              <span style="width:6px;height:6px;background:#374151;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+              <span style="color:#6b7280;font-size:10px">空头研究员</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:4px">
+              <span style="width:6px;height:6px;background:#374151;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+              <span style="color:#6b7280;font-size:10px">研究经理</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Team: Trading + Risk + Portfolio -->
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <div style="color:#6b7280;font-size:9px;margin-bottom:2px;padding-left:2px">交易 / 风控 / 组合</div>
+          <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:4px">
+            <span style="width:6px;height:6px;background:#374151;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+            <span style="color:#6b7280;font-size:10px">交易员</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:4px">
+            <span style="width:6px;height:6px;background:#374151;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+            <span style="color:#6b7280;font-size:10px">风控团队 (3人)</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:4px">
+            <span style="width:6px;height:6px;background:#374151;border-radius:50%;display:inline-block;flex-shrink:0"></span>
+            <span style="color:#6b7280;font-size:10px">投资组合经理</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Reports -->
+      <div style="background:#0a0c14;padding:12px 16px;overflow-y:auto;display:flex;flex-direction:column;gap:10px">
+
+        <!-- Decision card (completed state, pinned top) -->
+        <div style="background:linear-gradient(135deg,#14532d 0%,#166534 100%);border:1px solid #22c55e55;border-radius:8px;padding:12px;display:flex;align-items:center;gap:16px;opacity:0.3">
+          <div style="text-align:center;min-width:80px">
+            <div style="color:#86efac;font-size:9px;margin-bottom:2px">最终决策</div>
+            <div style="color:#22c55e;font-size:28px;font-weight:900;letter-spacing:2px">BUY</div>
+          </div>
+          <div style="flex:1;border-left:1px solid #22c55e33;padding-left:12px">
+            <div style="color:#86efac;font-size:10px;margin-bottom:4px">TSLA · 2026-05-18</div>
+            <div style="color:#6b7280;font-size:9px">等待分析完成...</div>
+          </div>
+        </div>
+
+        <!-- Market report (completed) -->
+        <div style="background:#0f1117;border:1px solid #1e2235;border-radius:6px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#12172a;border-bottom:1px solid #1e2235">
+            <span style="color:#22c55e;font-size:10px;font-weight:bold">✓ 市场分析报告</span>
+            <span style="color:#374151;font-size:9px">Market Analyst</span>
+          </div>
+          <div style="padding:10px 12px;color:#94a3b8;font-size:10px;line-height:1.7;max-height:80px;overflow:hidden">
+            TSLA技术面分析：MACD已转正至+15.32，RSI=57.96处于健康中性区，布林带中轨$401上方。50日均线首次拐头向上，黄金交叉即将形成...
+          </div>
+        </div>
+
+        <!-- Sentiment report (completed) -->
+        <div style="background:#0f1117;border:1px solid #1e2235;border-radius:6px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#12172a;border-bottom:1px solid #1e2235">
+            <span style="color:#22c55e;font-size:10px;font-weight:bold">✓ 情绪分析报告</span>
+            <span style="color:#374151;font-size:9px">Sentiment Analyst</span>
+          </div>
+          <div style="padding:10px 12px;color:#94a3b8;font-size:10px;line-height:1.7;max-height:60px;overflow:hidden">
+            社交媒体看多情绪升温，Reddit r/stocks 讨论度上升 34%，StockTwits 看多比例 72%...
+          </div>
+        </div>
+
+        <!-- News report (in progress, streaming) -->
+        <div style="background:#0f1117;border:1px solid #f59e0b33;border-radius:6px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#1a1400;border-bottom:1px solid #f59e0b22">
+            <span style="color:#f59e0b;font-size:10px;font-weight:bold">⟳ 新闻分析报告 <span style="animation:pulse 1s infinite;display:inline">生成中...</span></span>
+            <span style="color:#374151;font-size:9px">News Analyst</span>
+          </div>
+          <div style="padding:10px 12px;color:#94a3b8;font-size:10px;line-height:1.7">
+            正在检索宏观新闻和行业动态<span style="animation:pulse 0.8s infinite;display:inline">▌</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Status bar -->
+    <div style="background:#0f1117;border-top:1px solid #1e2235;padding:6px 20px;display:flex;justify-content:space-between;align-items:center">
+      <span style="color:#6b7280;font-size:9px">⟳ 分析进行中 · 新闻分析师运行中</span>
+      <span style="color:#374151;font-size:9px">约需 3-5 分钟</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="mockup" style="margin-top:16px">
+  <div class="mockup-header">移动端布局（上下堆叠）</div>
+  <div class="mockup-body" style="background:#0a0c14;padding:12px;max-width:320px;margin:0 auto">
+    <div style="color:#6b7280;font-size:9px;text-align:center;margin-bottom:8px">智能体进度（折叠，点击展开）</div>
+    <div style="background:#0f1117;border:1px solid #1e2235;border-radius:6px;padding:8px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="color:#94a3b8;font-size:10px">进度 3/8</span>
+        <div style="background:#1e2235;border-radius:2px;height:3px;flex:1;margin:0 10px"><div style="background:#7c85ff;width:37%;height:3px;border-radius:2px"></div></div>
+        <span style="color:#6b7280;font-size:10px">▾</span>
+      </div>
+    </div>
+    <div style="color:#6b7280;font-size:9px;text-align:center">↓ 报告区（向下滚动查看全文）</div>
+  </div>
+</div>
+
+<style>
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+</style>

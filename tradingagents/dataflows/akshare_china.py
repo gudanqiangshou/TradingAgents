@@ -1567,11 +1567,11 @@ def get_hot_up_rank() -> str:
             lambda: sess.post(rank_url, json=rank_payload, timeout=10)
         )
         if rank_resp.status_code != 200:
-            return f"<飙升榜 unavailable: rank endpoint HTTP {rank_resp.status_code}>"
+            return f"<飙升榜 暂不可用： rank endpoint HTTP {rank_resp.status_code}>"
         rank_json = rank_resp.json()
         rank_data = rank_json.get("data") if isinstance(rank_json, dict) else None
         if not isinstance(rank_data, list) or not rank_data:
-            return "<飙升榜 unavailable: empty rank list from eastmoney>"
+            return "<飙升榜 暂不可用： empty rank list from eastmoney>"
         # rank_data items have keys: sc (e.g. "SH600519"), rk (current rank), hrc (rank change vs yesterday)
 
         # Step 2: GET prices for those tickers via push2.eastmoney.com
@@ -1582,7 +1582,7 @@ def get_hot_up_rank() -> str:
             if isinstance(sc, str) and len(sc) >= 8:
                 marks.append(("0." if "SZ" in sc else "1.") + sc[2:])
         if not marks:
-            return "<飙升榜 unavailable: no valid sc codes from rank list>"
+            return "<飙升榜 暂不可用： no valid sc codes from rank list>"
         secids = ",".join(marks) + ",?v=08926209912590994"
         price_url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
         price_params = {
@@ -1596,14 +1596,14 @@ def get_hot_up_rank() -> str:
             lambda: sess.get(price_url, params=price_params, timeout=10)
         )
         if price_resp.status_code != 200:
-            return f"<飙升榜 unavailable: price endpoint HTTP {price_resp.status_code}>"
+            return f"<飙升榜 暂不可用： price endpoint HTTP {price_resp.status_code}>"
         price_json = price_resp.json()
         price_diff = (
             (price_json.get("data") or {}).get("diff", [])
             if isinstance(price_json, dict) else []
         )
         if not isinstance(price_diff, list) or not price_diff:
-            return "<飙升榜 unavailable: empty price list from push2>"
+            return "<飙升榜 暂不可用： empty price list from push2>"
 
         # Step 3: merge rank_data + price_diff into a single DataFrame
         # rank_data: sc, rk, hrc (and we use sc as the key)
@@ -1635,11 +1635,11 @@ def get_hot_up_rank() -> str:
         df = df.dropna(subset=["排名较昨日变动"]).sort_values("排名较昨日变动", ascending=False).head(20)
 
         if df.empty:
-            return "<飙升榜 unavailable: no rows after merge>"
+            return "<飙升榜 暂不可用： no rows after merge>"
 
         from datetime import datetime as _dt
         header = (
-            "🚀 东方财富 attention 飙升榜 — Top 20 (排名较昨日变动 desc)"
+            "🚀 东方财富 关注度飙升榜 — Top 20（按昨日排名变动降序）"
         )
         rows = []
         for _, r in df.iterrows():
@@ -1654,14 +1654,13 @@ def get_hot_up_rank() -> str:
             )
         return (
             header + "\n" + "\n".join(rows) + "\n\n"
-            "Interpretation: Stocks here have suddenly become topics of retail attention. "
-            "Combined with 涨跌幅 direction, indicates breakout/breakdown narratives forming. "
-            "Cross-reference with the same-board peers in 涨停板 or the 龙虎榜 to confirm "
-            "if a sector-wide narrative is in motion."
+            "📋 解读：以上股票今日突然成为散户关注焦点。结合涨跌幅方向："
+            "涨停或大涨 = 主升浪起势；急跌 = 利空集中爆发。"
+            "与同板块涨停板或龙虎榜横向比对，可判断是否板块主升浪正在形成。"
         )
     except Exception as e:
         logger.warning("飙升榜 fetch failed: %s", e)
-        return f"<飙升榜 unavailable: {type(e).__name__}: {str(e)[:120]}>"
+        return f"<飙升榜 暂不可用： {type(e).__name__}: {str(e)[:120]}>"
 
 
 # ---------------------------------------------------------------------------

@@ -117,7 +117,7 @@ def test_trending_happy_path():
     payload = {"symbols": _make_trending_symbols(30), "response": {"status": 200}}
     with patch("tradingagents.dataflows.stocktwits.urlopen", _make_urlopen_mock(payload)):
         result = fetch_stocktwits_trending(limit=30)
-    assert "🇺🇸 StockTwits Trending Equities" in result
+    assert "🇺🇸 StockTwits 美股热议榜" in result
     assert "| Symbol | Exchange | Title |" not in result
     # Count data rows: numbered lines like "1. SYM1 NYSE · Company 1"
     data_rows = [l for l in result.splitlines() if re.match(r"^\d+\. SYM", l)]
@@ -136,11 +136,11 @@ def test_trending_limit_truncates():
 
 @pytest.mark.unit
 def test_trending_endpoint_returns_empty_list():
-    """data['symbols']=[] → 'No StockTwits trending symbols available'."""
+    """data['symbols']=[] → 'StockTwits 热议榜 暂无数据'."""
     payload = {"symbols": [], "response": {"status": 200}}
     with patch("tradingagents.dataflows.stocktwits.urlopen", _make_urlopen_mock(payload)):
         result = fetch_stocktwits_trending()
-    assert result == "No StockTwits trending symbols available"
+    assert result == "StockTwits 热议榜 暂无数据"
 
 
 @pytest.mark.unit
@@ -162,10 +162,10 @@ def test_trending_403_cloudflare_returns_clear_message():
 
 @pytest.mark.unit
 def test_trending_timeout_returns_unavailable():
-    """TimeoutError → '<stocktwits trending unavailable: TimeoutError>'."""
+    """TimeoutError → '<StockTwits 热议榜 暂不可用: TimeoutError>'."""
     with patch("tradingagents.dataflows.stocktwits.urlopen", side_effect=TimeoutError("timed out")):
         result = fetch_stocktwits_trending()
-    assert result == "<stocktwits trending unavailable: TimeoutError>"
+    assert result == "<StockTwits 热议榜 暂不可用: TimeoutError>"
 
 
 @pytest.mark.unit
@@ -187,7 +187,7 @@ def test_trending_malformed_json_returns_unavailable():
     mock_open = MagicMock(return_value=cm)
     with patch("tradingagents.dataflows.stocktwits.urlopen", mock_open):
         result = fetch_stocktwits_trending()
-    assert "unavailable" in result
+    assert "暂不可用" in result
 
 
 @pytest.mark.unit
@@ -196,7 +196,7 @@ def test_trending_symbols_not_list_returns_no_data():
     payload = {"symbols": "not a list", "response": {"status": 200}}
     with patch("tradingagents.dataflows.stocktwits.urlopen", _make_urlopen_mock(payload)):
         result = fetch_stocktwits_trending()
-    assert "No StockTwits trending symbols available" in result
+    assert "StockTwits 热议榜 暂无数据" in result
 
 
 @pytest.mark.unit

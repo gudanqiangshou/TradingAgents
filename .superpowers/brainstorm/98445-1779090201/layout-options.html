@@ -1,0 +1,129 @@
+<h2>页面整体布局方案</h2>
+<p class="subtitle">用户输入股票代码后，多智能体分析过程和报告如何呈现？</p>
+
+<div class="cards">
+
+  <!-- Option A: Split Panel -->
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0f1117;padding:12px;border-radius:6px;font-family:monospace;font-size:11px">
+      <div style="display:grid;grid-template-columns:200px 1fr;gap:8px;height:200px">
+        <div style="background:#1a1d2e;border-radius:4px;padding:8px">
+          <div style="color:#7c85ff;font-size:10px;font-weight:bold;margin-bottom:8px">智能体进度</div>
+          <div style="display:flex;flex-direction:column;gap:5px">
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block"></span><span style="color:#e2e8f0;font-size:10px">市场分析师 ✓</span></div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block"></span><span style="color:#e2e8f0;font-size:10px">情绪分析师 ✓</span></div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;background:#f59e0b;border-radius:50%;display:inline-block;animation:pulse 1s infinite"></span><span style="color:#fbbf24;font-size:10px">新闻分析师 ···</span></div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;background:#374151;border-radius:50%;display:inline-block"></span><span style="color:#6b7280;font-size:10px">基本面分析师</span></div>
+            <div style="margin-top:4px;border-top:1px solid #374151;padding-top:4px;color:#6b7280;font-size:10px">研究团队 (等待)</div>
+            <div style="color:#6b7280;font-size:10px">交易员 (等待)</div>
+            <div style="color:#6b7280;font-size:10px">投资组合经理</div>
+          </div>
+        </div>
+        <div style="background:#1a1d2e;border-radius:4px;padding:8px;overflow:hidden">
+          <div style="color:#7c85ff;font-size:10px;font-weight:bold;margin-bottom:6px">分析报告（实时更新）</div>
+          <div style="color:#94a3b8;font-size:9px;line-height:1.5">
+            <div style="color:#22c55e;font-size:9px;margin-bottom:4px">✓ 市场分析报告</div>
+            <div style="color:#e2e8f0;font-size:9px">TSLA当前RSI=57.96，处于健康中性区。MACD已转正至+15.32，多头动能强劲。价格站上50日和200日均线，建议...</div>
+            <div style="border-top:1px solid #374151;margin-top:6px;padding-top:4px;color:#f59e0b;font-size:9px">⟳ 新闻分析师正在分析...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A · 左右分栏</h3>
+      <p>左侧固定显示所有智能体进度状态，右侧实时渲染报告内容。<br>
+      <strong>优点：</strong>进度和内容同时可见<br>
+      <strong>适合：</strong>宽屏/电脑端体验好，移动端上下排列</p>
+    </div>
+  </div>
+
+  <!-- Option B: Timeline Feed -->
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0f1117;padding:12px;border-radius:6px;font-size:11px">
+      <div style="height:200px;overflow:hidden;padding:4px">
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:flex-start">
+          <div style="width:28px;height:28px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;flex-shrink:0">市</div>
+          <div style="background:#1a1d2e;border-radius:4px;padding:6px;flex:1">
+            <div style="color:#22c55e;font-size:9px;font-weight:bold;margin-bottom:3px">市场分析师 · 完成</div>
+            <div style="color:#94a3b8;font-size:9px">TSLA技术面分析：MACD金叉信号，RSI中性区，布林带上轨$452.58...</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:flex-start">
+          <div style="width:28px;height:28px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;flex-shrink:0">情</div>
+          <div style="background:#1a1d2e;border-radius:4px;padding:6px;flex:1">
+            <div style="color:#22c55e;font-size:9px;font-weight:bold;margin-bottom:3px">情绪分析师 · 完成</div>
+            <div style="color:#94a3b8;font-size:9px">社交媒体情绪偏多，Reddit讨论度上升，StockTwits看多比例72%...</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <div style="width:28px;height:28px;border-radius:50%;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;flex-shrink:0;animation:pulse 1.5s infinite">新</div>
+          <div style="background:#1a1d2e;border-radius:4px;padding:6px;flex:1;border:1px solid #f59e0b33">
+            <div style="color:#f59e0b;font-size:9px;font-weight:bold;margin-bottom:3px">新闻分析师 · 分析中···</div>
+            <div style="color:#6b7280;font-size:9px">正在获取最新新闻和宏观数据...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B · 时间线动态流</h3>
+      <p>每个智能体完成后像聊天气泡一样出现，报告从上往下流式追加。<br>
+      <strong>优点：</strong>有强烈的"实时感"，移动端体验极佳<br>
+      <strong>适合：</strong>手机优先场景</p>
+    </div>
+  </div>
+
+  <!-- Option C: Dashboard Tabs -->
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0f1117;padding:12px;border-radius:6px;font-size:11px">
+      <div style="height:200px">
+        <!-- Tabs -->
+        <div style="display:flex;gap:2px;margin-bottom:8px;border-bottom:1px solid #374151;padding-bottom:4px">
+          <div style="background:#7c85ff;color:#fff;padding:3px 8px;border-radius:3px;font-size:9px">进度总览</div>
+          <div style="color:#6b7280;padding:3px 8px;font-size:9px">市场</div>
+          <div style="color:#6b7280;padding:3px 8px;font-size:9px">情绪</div>
+          <div style="color:#f59e0b;padding:3px 8px;font-size:9px">新闻⟳</div>
+          <div style="color:#6b7280;padding:3px 8px;font-size:9px">基本面</div>
+          <div style="color:#6b7280;padding:3px 8px;font-size:9px">最终决策</div>
+        </div>
+        <!-- Progress overview tab content -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+          <div style="background:#1a1d2e;border-radius:4px;padding:6px">
+            <div style="color:#94a3b8;font-size:9px;margin-bottom:4px">分析师团队</div>
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <div style="display:flex;justify-content:space-between"><span style="color:#e2e8f0;font-size:9px">市场</span><span style="color:#22c55e;font-size:9px">✓</span></div>
+              <div style="display:flex;justify-content:space-between"><span style="color:#e2e8f0;font-size:9px">情绪</span><span style="color:#22c55e;font-size:9px">✓</span></div>
+              <div style="display:flex;justify-content:space-between"><span style="color:#fbbf24;font-size:9px">新闻</span><span style="color:#f59e0b;font-size:9px">⟳</span></div>
+              <div style="display:flex;justify-content:space-between"><span style="color:#6b7280;font-size:9px">基本面</span><span style="color:#6b7280;font-size:9px">—</span></div>
+            </div>
+          </div>
+          <div style="background:#1a1d2e;border-radius:4px;padding:6px">
+            <div style="color:#94a3b8;font-size:9px;margin-bottom:4px">后续团队</div>
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <div style="display:flex;justify-content:space-between"><span style="color:#6b7280;font-size:9px">研究团队</span><span style="color:#6b7280;font-size:9px">—</span></div>
+              <div style="display:flex;justify-content:space-between"><span style="color:#6b7280;font-size:9px">交易员</span><span style="color:#6b7280;font-size:9px">—</span></div>
+              <div style="display:flex;justify-content:space-between"><span style="color:#6b7280;font-size:9px">风控团队</span><span style="color:#6b7280;font-size:9px">—</span></div>
+              <div style="display:flex;justify-content:space-between"><span style="color:#6b7280;font-size:9px">组合经理</span><span style="color:#6b7280;font-size:9px">—</span></div>
+            </div>
+          </div>
+          <div style="grid-column:1/-1;background:#1a1d2e;border-radius:4px;padding:6px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="flex:1;background:#374151;border-radius:2px;height:4px"><div style="background:#7c85ff;width:35%;height:4px;border-radius:2px"></div></div>
+              <span style="color:#94a3b8;font-size:9px">35%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C · 标签页仪表盘</h3>
+      <p>顶部 Tab 栏，一个总览 + 每个智能体一个 Tab，随时可切换查看各报告。<br>
+      <strong>优点：</strong>内容组织清晰，各报告独立不混乱<br>
+      <strong>适合：</strong>内容量大时阅读体验好</p>
+    </div>
+  </div>
+
+</div>
+
+<style>
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+</style>

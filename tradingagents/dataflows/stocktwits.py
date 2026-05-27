@@ -128,19 +128,19 @@ def fetch_stocktwits_trending(limit: int = 30, timeout: float = 10.0) -> str:
         if exc.code == 403:
             return "<stocktwits trending blocked: HTTP 403 — anti-bot challenge>"
         if exc.code >= 500:
-            return f"<stocktwits trending unavailable: HTTP {exc.code}>"
+            return f"<StockTwits 热议榜 暂不可用: HTTP {exc.code}>"
         logger.warning("StockTwits trending HTTP %s", exc.code)
-        return f"<stocktwits trending unavailable: HTTP {exc.code}>"
+        return f"<StockTwits 热议榜 暂不可用: HTTP {exc.code}>"
     except (URLError, TimeoutError) as exc:
-        return f"<stocktwits trending unavailable: {type(exc).__name__}>"
+        return f"<StockTwits 热议榜 暂不可用: {type(exc).__name__}>"
     except json.JSONDecodeError as exc:
-        return f"<stocktwits trending unavailable: {type(exc).__name__}>"
+        return f"<StockTwits 热议榜 暂不可用: {type(exc).__name__}>"
     except Exception as exc:
-        return f"<stocktwits trending unavailable: {type(exc).__name__}>"
+        return f"<StockTwits 热议榜 暂不可用: {type(exc).__name__}>"
 
     symbols = data.get("symbols") if isinstance(data, dict) else None
     if not isinstance(symbols, list) or len(symbols) == 0:
-        return "No StockTwits trending symbols available"
+        return "StockTwits 热议榜 暂无数据"
 
     now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     rows = []
@@ -157,22 +157,20 @@ def fetch_stocktwits_trending(limit: int = 30, timeout: float = 10.0) -> str:
             break
 
     if not rows:
-        return "No StockTwits trending symbols available"
+        return "StockTwits 热议榜 暂无数据"
 
     n = len(rows)
     lines = [
-        f"🇺🇸 StockTwits Trending Equities — Top {n} (retrieved {now_str} UTC)",
+        f"🇺🇸 StockTwits 美股热议榜 — Top {n}（获取于 {now_str} UTC）",
     ]
     for i, (symbol, exchange, title) in enumerate(rows, 1):
         lines.append(f"{i}. {symbol} {exchange} · {title}")
 
     lines += [
         "",
-        "Interpretation: These US equity tickers have the highest message/cashtag",
-        "velocity on StockTwits right now. Pair with bullish/bearish ratio from",
-        "fetch_stocktwits_messages(ticker) to determine narrative direction;",
-        "combine with Google Trends to confirm whether attention is sustained or",
-        "spiking. Cross-source confirmation with Reddit r/wallstreetbets or news",
-        "flow helps separate organic interest from pump-and-dump.",
+        "📋 解读：以上美股 ticker 当前在 StockTwits 上 cashtag 讨论量最高。",
+        "结合 StockTwits 个股看多/看空标签比例判断方向；配合 Google Trends 看搜索热度",
+        "是持续上升还是单点 spike。交叉 Reddit r/wallstreetbets 或新闻流，",
+        "可区分有机关注度与拉高出货炒作。",
     ]
     return "\n".join(lines)
