@@ -150,7 +150,12 @@ def fetch_stocktwits_trending(limit: int = 30, timeout: float = 10.0) -> str:
         symbol = entry.get("symbol")
         if not symbol:
             continue
-        exchange = entry.get("exchange", "")
+        exchange = entry.get("exchange", "") or ""
+        # Filter out crypto cashtags (XRP.X / ETH.X / BTC.X / etc.) — the
+        # /equities.json endpoint still returns them mixed in. We only want
+        # US equities here; crypto attention flows through other vendors.
+        if exchange.upper() == "CRYPTO" or "." in str(symbol):
+            continue
         title = entry.get("title", "")
         rows.append((symbol, exchange, title))
         if len(rows) >= limit:

@@ -373,12 +373,13 @@ def section_d_stocktwits() -> SectionResult:
             top20_codes=[], rank_by_code={}, summary_by_code={},
         )
 
-    # Build display: Top 5 lines only, keeping the header
-    header_lines = [l for l in raw_md.splitlines() if not _ST_NUMBERED_RE.match(l) and l.strip()]
+    # Build display: Top 5 with our own header (not the Top 20 header from raw_md)
     top5_numbered = sorted(parsed, key=lambda x: x[0])[:5]
-    display_lines = header_lines[:1]  # keep first header line
-    for line_num, ticker, rest in top5_numbered:
-        display_lines.append(f"{line_num}. {ticker} {rest}")
+    from datetime import datetime as _dt
+    now_utc = _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    display_lines = [f"🇺🇸 StockTwits 美股热议榜 — Top 5（获取于 {now_utc} UTC）"]
+    for i, (_, ticker, rest) in enumerate(top5_numbered, 1):
+        display_lines.append(f"{i}. {ticker} {rest}")
 
     top20 = sorted(parsed, key=lambda x: x[0])[:20]
     top20_codes = [ticker for _, ticker, _ in top20]
