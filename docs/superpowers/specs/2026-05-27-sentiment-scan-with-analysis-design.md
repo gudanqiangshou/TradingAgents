@@ -120,7 +120,6 @@ related_memory:
 ```
 
 注：`analysis_budget_exhausted` (top-level) **iff** `any(a["status"] == "budget_exhausted" for a in analyses)`。两者必须保持一致（push 逻辑单一真相）。
-```
 
 `analyses[].status` 取值与推送呈现规则：
 
@@ -151,8 +150,7 @@ tradingagents/sentiment_scan/               # 新包
 
 变更：
 - 在 `tradingagents/agents/utils/rating.py` 顶部新增 `SIGNAL_ACTION_MAP = {...}` 常量
-- `web/state_tracker.py` 删除原定义，改为 `from tradingagents.agents.utils.rating import SIGNAL_ACTION_MAP`
-- `web/app.py:48` 既有 `from web.state_tracker import ... SIGNAL_ACTION_MAP` 不动（re-export 仍生效），语义零变化
+- `web/state_tracker.py` 删除原定义体，改为 `from tradingagents.agents.utils.rating import SIGNAL_ACTION_MAP`，**且必须保留 `SIGNAL_ACTION_MAP` 在 `web.state_tracker` 模块的公共表面**（不写下划线前缀、不 `del`）——因为 `web/app.py:48` 与 `tests/web/test_state_tracker.py`、`tests/web/test_app.py` 通过 `from web.state_tracker import ... SIGNAL_ACTION_MAP` 导入，re-export 不可丢
 - 触动 web 包但只是行号位移与 import path，**不影响 baseline 78 测试语义**
 
 `sentiment_scan/analysis_runner.py` 通过 `from tradingagents.agents.utils.rating import SIGNAL_ACTION_MAP` 拿到，**不依赖 web 包**（保持"分析进程不走 web"约束）。
