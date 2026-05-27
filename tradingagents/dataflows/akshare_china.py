@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 import time as _time
 from datetime import datetime, timedelta
 
@@ -1396,19 +1397,42 @@ def _safe_str(value) -> str:
 
 
 def _eastmoney_session():
-    """A requests.Session with trust_env=False to bypass macOS system-level
-    proxy configuration. The user's machine has a system proxy that wrongly
-    routes push2.eastmoney.com and a few other eastmoney sub-domains to a
-    foreign proxy returning ProxyError. trust_env=False forces direct
-    connection. Use this for any direct eastmoney HTTP call from this module.
-    Returns a configured Session with a desktop UA + JSON Accept header.
-    """
+    """A requests.Session configured to bypass macOS system-level proxy
+    and look like a real Chrome browser making XHR requests from the
+    Eastmoney 股吧 page. Useful for eastmoney API sub-domains that have
+    light anti-bot heuristics (UA + Referer/Origin checks)."""
     import requests
     s = requests.Session()
-    s.trust_env = False
-    s.headers["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)"
-    s.headers["Accept"] = "application/json, text/plain, */*"
+    s.trust_env = False  # bypass system proxy (push2.eastmoney.com is blocked through proxy)
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://guba.eastmoney.com/rank/",
+        "Origin": "https://guba.eastmoney.com",
+    })
     return s
+
+
+def _eastmoney_http_retry(call_fn, max_attempts=3, backoffs=(0.5, 1.5, 3.0)):
+    """Light retry wrapper for eastmoney HTTP calls. Retries on ConnectionError
+    / Timeout (eastmoney burst-rate-limits with TCP resets, not HTTP codes).
+    Other exceptions propagate immediately. Returns the response on success."""
+    import requests as _r
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return call_fn()
+        except (_r.exceptions.ConnectionError, _r.exceptions.Timeout, ConnectionError) as e:
+            last_exc = e
+            if attempt < max_attempts - 1:
+                time.sleep(backoffs[attempt])
+    # Exhausted retries; re-raise the last exception so caller's outer try wraps it
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -1539,7 +1563,9 @@ def get_hot_up_rank() -> str:
             "pageNo": 1,
             "pageSize": 100,
         }
-        rank_resp = sess.post(rank_url, json=rank_payload, timeout=10)
+        rank_resp = _eastmoney_http_retry(
+            lambda: sess.post(rank_url, json=rank_payload, timeout=10)
+        )
         if rank_resp.status_code != 200:
             return f"<飙升榜 unavailable: rank endpoint HTTP {rank_resp.status_code}>"
         rank_json = rank_resp.json()
@@ -1566,7 +1592,9 @@ def get_hot_up_rank() -> str:
             "fields": "f14,f3,f12,f2",
             "secids": secids,
         }
-        price_resp = sess.get(price_url, params=price_params, timeout=10)
+        price_resp = _eastmoney_http_retry(
+            lambda: sess.get(price_url, params=price_params, timeout=10)
+        )
         if price_resp.status_code != 200:
             return f"<飙升榜 unavailable: price endpoint HTTP {price_resp.status_code}>"
         price_json = price_resp.json()

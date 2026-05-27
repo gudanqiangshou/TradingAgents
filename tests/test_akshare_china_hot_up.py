@@ -307,3 +307,82 @@ def test_hot_up_session_has_trust_env_false():
     """_eastmoney_session() (real, not mocked) must have trust_env=False."""
     sess = ac._eastmoney_session()
     assert sess.trust_env is False
+
+
+# ---------------------------------------------------------------------------
+# New: retry + session header tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_eastmoney_session_has_browser_headers():
+    """_eastmoney_session() must have Chrome/120 UA, correct Referer and Origin."""
+    s = ac._eastmoney_session()
+    assert s.trust_env is False
+    assert "Chrome/120" in s.headers["User-Agent"]
+    assert s.headers["Referer"] == "https://guba.eastmoney.com/rank/"
+    assert s.headers["Origin"] == "https://guba.eastmoney.com"
+
+
+@pytest.mark.unit
+def test_hot_up_retries_on_connection_error_then_succeeds():
+    """First sess.post raises ConnectionError; second call succeeds → valid markdown."""
+    rank_data = _make_rank_data(3)
+    rank_response = {"data": rank_data}
+    price_response = {"data": {"diff": _make_price_diff(rank_data)}}
+
+    fake_post_resp = MagicMock(status_code=200)
+    fake_post_resp.json.return_value = rank_response
+    fake_get_resp = MagicMock(status_code=200)
+    fake_get_resp.json.return_value = price_response
+
+    fake_session = MagicMock()
+    # First call raises, second succeeds
+    fake_session.post.side_effect = [
+        requests.exceptions.ConnectionError("RemoteDisconnected"),
+        fake_post_resp,
+    ]
+    fake_session.get.return_value = fake_get_resp
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session), \
+         patch("tradingagents.dataflows.akshare_china.time.sleep") as mock_sleep:
+        out = ac.get_hot_up_rank()
+
+    assert "# 东方财富 attention 飙升榜" in out
+    assert fake_session.post.call_count == 2
+    # sleep was called once (backoff[0] = 0.5)
+    mock_sleep.assert_called_once_with(0.5)
+
+
+@pytest.mark.unit
+def test_hot_up_exhausts_retries_returns_unavailable():
+    """sess.post raises ConnectionError on all 3 attempts → unavailable string, no raise."""
+    fake_session = MagicMock()
+    fake_session.post.side_effect = requests.exceptions.ConnectionError("burst RST")
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session), \
+         patch("tradingagents.dataflows.akshare_china.time.sleep"):
+        out = ac.get_hot_up_rank()
+
+    assert isinstance(out, str)
+    assert "飙升榜" in out
+    assert "unavailable" in out or "ConnectionError" in out
+    assert fake_session.post.call_count == 3
+
+
+@pytest.mark.unit
+def test_hot_up_does_not_retry_on_value_error():
+    """sess.post.json() raises ValueError (malformed JSON) → unavailable, call_count == 1."""
+    fake_post_resp = MagicMock(status_code=200)
+    fake_post_resp.json.side_effect = ValueError("No JSON")
+    fake_session = MagicMock()
+    fake_session.post.return_value = fake_post_resp
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session), \
+         patch("tradingagents.dataflows.akshare_china.time.sleep") as mock_sleep:
+        out = ac.get_hot_up_rank()
+
+    assert isinstance(out, str)
+    assert "unavailable" in out or "飙升榜" in out
+    # ValueError is not retried — only one call
+    assert fake_session.post.call_count == 1
+    mock_sleep.assert_not_called()
