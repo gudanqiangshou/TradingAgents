@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import pytest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
@@ -112,24 +113,24 @@ def _make_urlopen_mock(payload: dict):
 
 @pytest.mark.unit
 def test_trending_happy_path():
-    """Valid JSON with 30 symbols → header, column headers, 30 table rows."""
+    """Valid JSON with 30 symbols → emoji header and 30 numbered lines."""
     payload = {"symbols": _make_trending_symbols(30), "response": {"status": 200}}
     with patch("tradingagents.dataflows.stocktwits.urlopen", _make_urlopen_mock(payload)):
         result = fetch_stocktwits_trending(limit=30)
-    assert result.startswith("# StockTwits Trending Equities")
-    assert "| Symbol | Exchange | Title |" in result
-    # Count data rows (lines containing " | SYM")
-    data_rows = [l for l in result.splitlines() if l.startswith("| ") and "Symbol" not in l and "---" not in l and l.strip() != "| -- | -- | -- | -- |"]
+    assert "🇺🇸 StockTwits Trending Equities" in result
+    assert "| Symbol | Exchange | Title |" not in result
+    # Count data rows: numbered lines like "1. SYM1 NYSE · Company 1"
+    data_rows = [l for l in result.splitlines() if re.match(r"^\d+\. SYM", l)]
     assert len(data_rows) == 30
 
 
 @pytest.mark.unit
 def test_trending_limit_truncates():
-    """limit=5 → only 5 rows in table."""
+    """limit=5 → only 5 numbered lines."""
     payload = {"symbols": _make_trending_symbols(30), "response": {"status": 200}}
     with patch("tradingagents.dataflows.stocktwits.urlopen", _make_urlopen_mock(payload)):
         result = fetch_stocktwits_trending(limit=5)
-    data_rows = [l for l in result.splitlines() if l.startswith("| ") and "Symbol" not in l and l.strip() != "| -- | -- | -- | -- |"]
+    data_rows = [l for l in result.splitlines() if re.match(r"^\d+\. SYM", l)]
     assert len(data_rows) == 5
 
 
@@ -210,6 +211,6 @@ def test_trending_symbol_missing_key_skipped():
         result = fetch_stocktwits_trending(limit=30)
     assert "GOOD" in result
     assert "No Symbol Entry" not in result
-    # Only 1 valid row
-    data_rows = [l for l in result.splitlines() if l.startswith("| ") and "Symbol" not in l and l.strip() != "| -- | -- | -- | -- |"]
+    # Only 1 valid numbered row
+    data_rows = [l for l in result.splitlines() if re.match(r"^\d+\.", l)]
     assert len(data_rows) == 1

@@ -57,7 +57,7 @@ def _make_fake_session(rank_response_json, price_response_json):
 
 @pytest.mark.unit
 def test_hot_up_happy_path():
-    """~5 rows of fake data → output contains header, table rows, ticker names, % signs."""
+    """~5 rows of fake data → output contains emoji header, compact lines, ticker names, % signs."""
     rank_data = _make_rank_data(5)
     rank_response = {"data": rank_data}
     price_response = {"data": {"diff": _make_price_diff(rank_data)}}
@@ -66,9 +66,11 @@ def test_hot_up_happy_path():
     with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
         out = ac.get_hot_up_rank()
 
-    assert "# 东方财富 attention 飙升榜" in out
-    assert "排名较昨日变动" in out
-    assert "| -- |" in out
+    assert "🚀" in out
+    assert "东方财富 attention 飙升榜" in out
+    # Compact line format (no markdown table)
+    assert "| -- |" not in out
+    assert "🔥" in out
     # At least one ticker name should appear
     assert "股票0" in out or "股票1" in out
     # % sign from formatted 涨跌幅
@@ -92,9 +94,9 @@ def test_hot_up_sorted_by_rank_change_desc():
     with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
         out = ac.get_hot_up_rank()
 
-    # The first data row (after header separator) should contain "+200"
-    lines = [l for l in out.splitlines() if l.startswith("|") and "-- |" not in l and "当前排名" not in l]
-    assert lines, "Expected at least one data row"
+    # The first data row should be a 🔥 line containing "+200"
+    lines = [l for l in out.splitlines() if l.startswith("🔥")]
+    assert lines, "Expected at least one 🔥 data row"
     assert "+200" in lines[0], f"Expected +200 in first data row, got: {lines[0]}"
 
 
@@ -104,7 +106,7 @@ def test_hot_up_sorted_by_rank_change_desc():
 
 @pytest.mark.unit
 def test_hot_up_top_20_truncation():
-    """30 rows of fake data → output table has exactly 20 data rows."""
+    """30 rows of fake data → output has exactly 20 🔥 data lines."""
     rank_data = _make_rank_data(30)
     rank_response = {"data": rank_data}
     price_response = {"data": {"diff": _make_price_diff(rank_data)}}
@@ -113,11 +115,8 @@ def test_hot_up_top_20_truncation():
     with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
         out = ac.get_hot_up_rank()
 
-    # Count data rows: lines starting with | that are not the header or separator
-    data_rows = [
-        l for l in out.splitlines()
-        if l.startswith("|") and "-- |" not in l and "当前排名" not in l
-    ]
+    # Count data rows: 🔥 lines
+    data_rows = [l for l in out.splitlines() if l.startswith("🔥")]
     assert len(data_rows) == 20, f"Expected 20 data rows, got {len(data_rows)}"
 
 
@@ -347,7 +346,8 @@ def test_hot_up_retries_on_connection_error_then_succeeds():
          patch("tradingagents.dataflows.akshare_china.time.sleep") as mock_sleep:
         out = ac.get_hot_up_rank()
 
-    assert "# 东方财富 attention 飙升榜" in out
+    assert "🚀" in out
+    assert "東方財富 attention 飙升榜" in out or "东方财富 attention 飙升榜" in out
     assert fake_session.post.call_count == 2
     # sleep was called once (backoff[0] = 0.5)
     mock_sleep.assert_called_once_with(0.5)

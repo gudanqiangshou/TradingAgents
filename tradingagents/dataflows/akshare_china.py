@@ -1639,10 +1639,7 @@ def get_hot_up_rank() -> str:
 
         from datetime import datetime as _dt
         header = (
-            "# 东方财富 attention 飙升榜 (top 20 by 排名较昨日变动)\n"
-            f"# Retrieved at: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            "| 当前排名 | 排名较昨日变动 | 代码 | 名称 | 涨跌幅 |\n"
-            "| -- | -- | -- | -- | -- |"
+            "🚀 东方财富 attention 飙升榜 — Top 20 (排名较昨日变动 desc)"
         )
         rows = []
         for _, r in df.iterrows():
@@ -1651,9 +1648,9 @@ def get_hot_up_rank() -> str:
             rank_now = r["当前排名"]
             rank_now_str = f"{int(rank_now)}" if pd.notna(rank_now) else "—"
             rank_chg = r["排名较昨日变动"]
-            rank_chg_str = f"{'+' if rank_chg >= 0 else ''}{int(rank_chg)}"
+            rank_chg_str = f"{int(rank_chg)}"
             rows.append(
-                f"| {rank_now_str} | {rank_chg_str} | {r['代码']} | {r['股票名称']} | {chg_str} |"
+                f"🔥 {r['代码']} {r['股票名称']} · 排名 #{rank_now_str} (飙升 +{rank_chg_str} 位) · {chg_str}"
             )
         return (
             header + "\n" + "\n".join(rows) + "\n\n"

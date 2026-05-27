@@ -161,13 +161,10 @@ def fetch_stocktwits_trending(limit: int = 30, timeout: float = 10.0) -> str:
 
     n = len(rows)
     lines = [
-        f"# StockTwits Trending Equities (top {n}, retrieved {now_str} UTC)",
-        "",
-        "| # | Symbol | Exchange | Title |",
-        "| -- | -- | -- | -- |",
+        f"🇺🇸 StockTwits Trending Equities — Top {n} (retrieved {now_str} UTC)",
     ]
     for i, (symbol, exchange, title) in enumerate(rows, 1):
-        lines.append(f"| {i} | {symbol} | {exchange} | {title} |")
+        lines.append(f"{i}. {symbol} {exchange} · {title}")
 
     lines += [
         "",
