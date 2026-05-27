@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE — do NOT load this file as-is.
+
+  1. Replace REPLACE_WITH_USER_WEBHOOK_URL with your 飞书 custom-bot webhook URL.
+  2. Install:
+       cp web/launchd/com.tradingagents.daily-sentiment-scan.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-sentiment-scan.plist
+  3. Test manually (no webhook push):
+       ./.venv/bin/python scripts/daily_sentiment_scan.py --no-feishu
+  4. Unload:
+       launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-sentiment-scan.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tradingagents.daily-sentiment-scan</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/a1/TradingAgents/.venv/bin/python</string>
+        <string>/Users/a1/TradingAgents/scripts/daily_sentiment_scan.py</string>
+        <string>--feishu-only</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/a1/TradingAgents</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>5</integer></dict>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TRADINGAGENTS_FEISHU_WEBHOOK</key>
+        <string>REPLACE_WITH_USER_WEBHOOK_URL</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/a1/.tradingagents/logs/daily-sentiment-scan-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/a1/.tradingagents/logs/daily-sentiment-scan-stderr.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
