@@ -1,6 +1,8 @@
 """Self-contained AkShare A-share data vendor; akshare loaded on demand."""
 
 import logging
+import threading
+import time as _time
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -10,6 +12,13 @@ from tradingagents.dataflows.config import get_config as _config_get, replace_se
 from tradingagents.market_resolver import resolve_market, Market
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level Xueqiu cache — thread-safe TTL cache for the 18s endpoints
+# ---------------------------------------------------------------------------
+_XUEQIU_CACHE: dict = {}  # key -> (cached_at_ts, df)
+_XUEQIU_CACHE_LOCK = threading.Lock()
+_XUEQIU_CACHE_TTL = 600  # 10 minutes
 
 
 def _df_is_empty(df) -> bool:
@@ -1318,6 +1327,36 @@ def get_social_sentiment(ticker: str) -> str:
             trend_7d = _trend_label_hk(rank_7d, current_rank)
             trend_30d = _trend_label_hk(rank_30d, current_rank)
 
+            # TOP100 HK attention enrichment
+            top100_section = ""
+            try:
+                df_top100 = ak.stock_hk_hot_rank_em()
+                if not _df_is_empty(df_top100):
+                    col_top100_code = next(
+                        (c for c in df_top100.columns if c in ("代码", "股票代码")), None
+                    )
+                    col_top100_rank = next(
+                        (c for c in df_top100.columns if "排名" in c), None
+                    )
+                    if col_top100_code:
+                        mask100 = df_top100[col_top100_code].astype(str).str.strip() == code5
+                        matched100 = df_top100[mask100]
+                        if not matched100.empty:
+                            top100_rank_val = ""
+                            if col_top100_rank:
+                                top100_rank_val = _safe_str(matched100.iloc[0].get(col_top100_rank, ""))
+                            top100_section = (
+                                f"\n## Position in TOP100 HK attention: "
+                                f"#{top100_rank_val} (out of 100 most-watched HK stocks today)"
+                            )
+                        else:
+                            top100_section = (
+                                "\n## Not in TOP100 HK attention today (less mainstream interest)"
+                            )
+            except Exception as exc:
+                logger.warning("stock_hk_hot_rank_em failed for %s: %s", code5, exc)
+                top100_section = ""
+
             output = (
                 f"# Social sentiment for {ticker} (HK, via Eastmoney 股吧)\n"
                 f"# Retrieved at: {retrieved_at}\n"
@@ -1328,11 +1367,444 @@ def get_social_sentiment(ticker: str) -> str:
                 f"- ~30 days ago: rank #{rank_30d} → {trend_30d}\n"
                 f"\n"
                 "(HK eastmoney endpoint provides rank only; no follower composition or concept keywords.)\n"
+                + top100_section + "\n"
             )
             return output
 
     except Exception as exc:
         return f"Error: unexpected social sentiment response for {ticker}: {exc}"
+
+
+def _safe_str(value) -> str:
+    """Convert value to string safely, returning '' for None/NaN."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+# ---------------------------------------------------------------------------
+# A. 涨停板 pool summary
+# ---------------------------------------------------------------------------
+
+def get_zt_pool_summary(curr_date: str) -> str:
+    """Return 涨停板 pool summary for the given trading date.
+
+    Parameters
+    ----------
+    curr_date:
+        Date in ``yyyy-mm-dd`` format.
+
+    Returns
+    -------
+    str
+        Formatted plaintext summary of 涨停板 stocks. Fail-safe: never raises.
+    """
+    err = _validate_date_str(curr_date, "curr_date")
+    if err:
+        return err
+
+    code_date = curr_date.replace("-", "")
+
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: A-share data source unavailable ({exc})"
+
+    try:
+        df = ak.stock_zt_pool_em(date=code_date)
+    except Exception as exc:
+        return f"Error: failed to fetch 涨停板 data for {curr_date}: {type(exc).__name__}: {str(exc)[:120]}"
+
+    if _df_is_empty(df):
+        return f"No 涨停板 data for {curr_date} (may be non-trading day or weekend)"
+
+    try:
+        total = len(df)
+
+        def _parse_market_cap(val):
+            try:
+                return float(val) / 1e8
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _parse_amount(val):
+            try:
+                return float(val) / 1e8
+            except (TypeError, ValueError):
+                return 0.0
+
+        # Determine column names (defensive: 流通市值 / 成交额 / 涨跌幅 / 代码 / 名称)
+        col_market = next((c for c in df.columns if "流通市值" in c), None)
+        col_amount = next((c for c in df.columns if "成交额" in c), None)
+        col_pct = next((c for c in df.columns if "涨跌幅" in c), None)
+        col_code = next((c for c in df.columns if c in ("代码", "股票代码")), None)
+        col_name = next((c for c in df.columns if c in ("名称", "股票名称")), None)
+
+        lines = [
+            f"# 涨停板池 for {curr_date} (Eastmoney)",
+            f"# Total 涨停 stocks: {total}",
+        ]
+
+        if col_market and col_code and col_name:
+            df_cap = df.copy()
+            df_cap["_cap"] = pd.to_numeric(df_cap[col_market], errors="coerce").fillna(0)
+            top_cap = df_cap.nlargest(10, "_cap")
+            lines.append("# Top 10 by 流通市值:")
+            for i, (_, row) in enumerate(top_cap.iterrows(), 1):
+                code = _safe_str(row.get(col_code, ""))
+                name = _safe_str(row.get(col_name, ""))
+                pct = _safe_str(row.get(col_pct, "")) if col_pct else "N/A"
+                cap_val = _parse_market_cap(row.get(col_market, 0))
+                amt_val = _parse_amount(row.get(col_amount, 0)) if col_amount else 0.0
+                lines.append(
+                    f"{i}. {code} {name} 涨幅+{pct}% 流通市值{cap_val:.1f}亿 成交额{amt_val:.1f}亿"
+                )
+
+        if col_amount and col_code and col_name:
+            df_amt = df.copy()
+            df_amt["_amt"] = pd.to_numeric(df_amt[col_amount], errors="coerce").fillna(0)
+            top_amt = df_amt.nlargest(10, "_amt")
+            lines.append("# Top 10 by 成交额:")
+            for i, (_, row) in enumerate(top_amt.iterrows(), 1):
+                code = _safe_str(row.get(col_code, ""))
+                name = _safe_str(row.get(col_name, ""))
+                pct = _safe_str(row.get(col_pct, "")) if col_pct else "N/A"
+                cap_val = _parse_market_cap(row.get(col_market, 0)) if col_market else 0.0
+                amt_val = _parse_amount(row.get(col_amount, 0))
+                lines.append(
+                    f"{i}. {code} {name} 涨幅+{pct}% 流通市值{cap_val:.1f}亿 成交额{amt_val:.1f}亿"
+                )
+
+        lines.append("")
+        lines.append(
+            "Interpretation: 涨停板 represents the strongest retail-FOMO signal in A-share. "
+            "High 成交额 涨停 = institutional + retail conviction; "
+            "small-cap 涨停 with low 成交额 = speculative."
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error: unexpected 涨停板 response for {curr_date}: {type(exc).__name__}: {str(exc)[:120]}"
+
+
+# ---------------------------------------------------------------------------
+# B. 飙升榜 — stocks with biggest day-over-day rank improvement
+# ---------------------------------------------------------------------------
+
+def get_hot_up_rank() -> str:
+    """Return 东方财富 attention 飙升榜 (top 20 by rank improvement).
+
+    Returns
+    -------
+    str
+        Formatted plaintext. Fail-safe: never raises.
+    """
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: A-share data source unavailable ({exc})"
+
+    try:
+        df = ak.stock_hot_up_em()
+    except Exception as exc:
+        return f"Error: failed to fetch 飙升榜 data: {type(exc).__name__}: {str(exc)[:120]}"
+
+    if _df_is_empty(df):
+        return "No 飙升榜 data available"
+
+    try:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        col_delta = next((c for c in df.columns if "较昨日" in c or "变动" in c), None)
+        col_rank = next((c for c in df.columns if "当前排名" in c), None)
+        col_code = next((c for c in df.columns if c in ("代码", "股票代码")), None)
+        col_name = next((c for c in df.columns if c in ("名称", "股票名称")), None)
+        col_pct = next((c for c in df.columns if "涨跌幅" in c), None)
+
+        if col_delta:
+            df_sorted = df.copy()
+            df_sorted["_delta_num"] = pd.to_numeric(df_sorted[col_delta], errors="coerce").fillna(-999999)
+            df_sorted = df_sorted.sort_values("_delta_num", ascending=False).head(20)
+        else:
+            df_sorted = df.head(20)
+
+        lines = [
+            "# 东方财富 attention 飙升榜 (top 20 stocks with largest day-over-day rank improvement)",
+            f"# Retrieved at: {now_str}",
+            "",
+            "| 当前排名 | 排名较昨日变动 | 代码 | 名称 | 涨跌幅 |",
+            "| -- | -- | -- | -- | -- |",
+        ]
+
+        for _, row in df_sorted.iterrows():
+            rank = _safe_str(row.get(col_rank, "N/A")) if col_rank else "N/A"
+            delta = _safe_str(row.get(col_delta, "N/A")) if col_delta else "N/A"
+            code = _safe_str(row.get(col_code, "N/A")) if col_code else "N/A"
+            name = _safe_str(row.get(col_name, "N/A")) if col_name else "N/A"
+            pct = _safe_str(row.get(col_pct, "N/A")) if col_pct else "N/A"
+            lines.append(f"| {rank} | {delta} | {code} | {name} | {pct} |")
+
+        lines.append("")
+        lines.append(
+            "Interpretation: Stocks here have suddenly become topics of retail attention. "
+            "Combined with 涨跌幅 direction, indicates breakout/breakdown narratives forming."
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error: unexpected 飙升榜 response: {type(exc).__name__}: {str(exc)[:120]}"
+
+
+# ---------------------------------------------------------------------------
+# C. 龙虎榜 summary (market-wide + ticker-specific)
+# ---------------------------------------------------------------------------
+
+def get_lhb_summary(ticker: str, curr_date: str, days_back: int = 5) -> str:
+    """Return 龙虎榜 summary for recent trading days.
+
+    Parameters
+    ----------
+    ticker:
+        A-share ticker (bare code or with exchange suffix).
+    curr_date:
+        Reference date in ``yyyy-mm-dd`` format (used as end_date).
+    days_back:
+        Number of days to look back from curr_date (default 5).
+
+    Returns
+    -------
+    str
+        Formatted plaintext. Fail-safe: never raises.
+    """
+    err = _validate_date_str(curr_date, "curr_date")
+    if err:
+        return err
+
+    try:
+        curr_date_dt = datetime.strptime(curr_date.strip(), "%Y-%m-%d")
+    except ValueError:
+        return f"Error: invalid date format for {curr_date!r}; expected yyyy-mm-dd"
+
+    code = ticker.strip().upper().split(".")[0]
+    end_yyyymmdd = curr_date.replace("-", "")
+    start_dt = curr_date_dt - timedelta(days=days_back)
+    start_yyyymmdd = start_dt.strftime("%Y%m%d")
+
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: A-share data source unavailable ({exc})"
+
+    try:
+        df = ak.stock_lhb_detail_em(start_date=start_yyyymmdd, end_date=end_yyyymmdd)
+    except Exception as exc:
+        return f"Error: failed to fetch 龙虎榜 data for {ticker}: {type(exc).__name__}: {str(exc)[:120]}"
+
+    if _df_is_empty(df):
+        return f"No 龙虎榜 data for the window {start_yyyymmdd}–{end_yyyymmdd}"
+
+    try:
+        col_code = next((c for c in df.columns if c in ("代码", "股票代码")), None)
+        col_name = next((c for c in df.columns if c in ("名称", "股票名称")), None)
+        col_date = next((c for c in df.columns if "上榜日" in c or "日期" in c), None)
+        col_pct = next((c for c in df.columns if "涨跌幅" in c), None)
+        col_net = next((c for c in df.columns if "净买" in c), None)
+        col_interp = next((c for c in df.columns if "解读" in c), None)
+
+        lines = [
+            f"# 龙虎榜 for {ticker} (recent {days_back} trading days, Eastmoney)",
+            "",
+            "## Ticker-specific 上榜 (if any):",
+        ]
+
+        if col_code:
+            df_ticker = df[df[col_code].astype(str).str.strip() == code]
+        else:
+            df_ticker = pd.DataFrame()
+
+        if _df_is_empty(df_ticker):
+            lines.append("未上榜 (not on 龙虎榜 in this window)")
+        else:
+            header_cols = [c for c in ["上榜日", col_date, "涨跌幅", col_pct, "净买额", col_net, "解读", col_interp] if c]
+            # Build table header
+            th_parts = []
+            for col in [col_date, col_pct, col_net, col_interp]:
+                if col:
+                    th_parts.append(col)
+            lines.append("| " + " | ".join(th_parts) + " |")
+            lines.append("| " + " | ".join(["--"] * len(th_parts)) + " |")
+            for _, row in df_ticker.iterrows():
+                row_parts = [_safe_str(row.get(c, "")) for c in th_parts]
+                lines.append("| " + " | ".join(row_parts) + " |")
+
+        lines.append("")
+        lines.append(f"## Market-wide context — Top 5 净买入 in window:")
+
+        # Try to sort by net buy amount
+        df_sorted = None
+        sort_note = ""
+        if col_net and not _df_is_empty(df):
+            try:
+                df_copy = df.copy()
+                df_copy["_net_numeric"] = pd.to_numeric(
+                    df_copy[col_net].astype(str).str.replace(",", "").str.replace("亿", "e8").str.replace("万", "e4"),
+                    errors="coerce"
+                )
+                df_sorted_buy = df_copy.sort_values("_net_numeric", ascending=False).head(5)
+                df_sorted_sell = df_copy.sort_values("_net_numeric", ascending=True).head(5)
+            except Exception:
+                sort_note = " (could not sort by 净买额 due to format)"
+                df_sorted_buy = df.head(5)
+                df_sorted_sell = df.tail(5)
+        else:
+            sort_note = " (could not sort by 净买额 due to format)"
+            df_sorted_buy = df.head(5)
+            df_sorted_sell = df.tail(5)
+
+        th_parts_mw = [c for c in [col_code, col_name, col_date, col_net, col_interp] if c]
+        lines.append("| " + " | ".join(th_parts_mw) + f" |{sort_note}")
+        lines.append("| " + " | ".join(["--"] * len(th_parts_mw)) + " |")
+        for _, row in df_sorted_buy.iterrows():
+            row_parts = [_safe_str(row.get(c, "")) for c in th_parts_mw]
+            lines.append("| " + " | ".join(row_parts) + " |")
+
+        lines.append("")
+        lines.append(f"## Market-wide context — Top 5 净卖出 in window:")
+        lines.append("| " + " | ".join(th_parts_mw) + " |")
+        lines.append("| " + " | ".join(["--"] * len(th_parts_mw)) + " |")
+        for _, row in df_sorted_sell.iterrows():
+            row_parts = [_safe_str(row.get(c, "")) for c in th_parts_mw]
+            lines.append("| " + " | ".join(row_parts) + " |")
+
+        lines.append("")
+        lines.append(
+            "Interpretation: 龙虎榜 captures large-fund / hot-money desk transactions and is a "
+            "\"hard signal\" (real capital flow), not just retail attention. The 解读 field reveals "
+            "institutional vs hot-money desk patterns."
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error: unexpected 龙虎榜 response for {ticker}: {type(exc).__name__}: {str(exc)[:120]}"
+
+
+# ---------------------------------------------------------------------------
+# D. 雪球 attention (with thread-safe TTL cache)
+# ---------------------------------------------------------------------------
+
+def _get_xueqiu_cached(symbol: str, ak) -> "pd.DataFrame | None":
+    """Fetch and cache 雪球 data with TTL. Thread-safe."""
+    now = _time.monotonic()
+    with _XUEQIU_CACHE_LOCK:
+        entry = _XUEQIU_CACHE.get(symbol)
+        if entry is not None:
+            cached_at, df = entry
+            if (now - cached_at) < _XUEQIU_CACHE_TTL:
+                return df
+
+    # Fetch outside the lock so we don't block other threads for 18s
+    try:
+        df = ak.stock_hot_tweet_xq(symbol=symbol)
+        if not isinstance(df, pd.DataFrame):
+            df = None
+    except Exception as exc:
+        logger.warning("stock_hot_tweet_xq(%s) failed: %s", symbol, exc)
+        df = None
+
+    with _XUEQIU_CACHE_LOCK:
+        _XUEQIU_CACHE[symbol] = (_time.monotonic(), df)
+    return df
+
+
+def get_xueqiu_attention(ticker: str) -> str:
+    """Return 雪球 social attention rank for an A-share ticker.
+
+    Parameters
+    ----------
+    ticker:
+        A-share ticker (bare 6-digit code or with exchange suffix).
+
+    Returns
+    -------
+    str
+        Formatted plaintext. Fail-safe: never raises.
+        Non-A-share tickers return a "not applicable" placeholder.
+    """
+    market = resolve_market(ticker)
+
+    if market not in (Market.A_SHARE,):
+        return "<xueqiu attention not applicable; only A-share supported via this endpoint>"
+
+    code = ticker.strip().upper().split(".")[0]
+    prefixed = _eastmoney_a_share_symbol(code)  # SH600519 / SZ000001 etc.
+
+    try:
+        ak = _dep_bootstrap.ensure("akshare")
+    except _dep_bootstrap.DependencyUnavailable as exc:
+        return f"Error: A-share data source unavailable ({exc})"
+
+    try:
+        df_hot = _get_xueqiu_cached("最热门", ak)
+        df_weekly = _get_xueqiu_cached("本周新增", ak)
+    except Exception as exc:
+        return f"Error: failed to fetch 雪球 attention: {type(exc).__name__}: {str(exc)[:120]}"
+
+    try:
+        lines = [f"# 雪球 attention for {ticker} (CN retail social platform, snapshot from past ≤10min)", ""]
+
+        def _lookup(df, prefixed_code):
+            if _df_is_empty(df):
+                return None, None, None
+            # Try column 股票代码
+            col_sym = next((c for c in df.columns if "代码" in c), None)
+            col_follow = next((c for c in df.columns if "关注" in c), None)
+            if col_sym is None:
+                return None, None, None
+            mask = df[col_sym].astype(str).str.upper() == prefixed_code.upper()
+            matched = df[mask]
+            if matched.empty:
+                return None, None, None
+            idx = matched.index[0]
+            rank = df.index.get_loc(idx) + 1  # 1-based
+            total = len(df)
+            follow_val = matched.iloc[0].get(col_follow, None) if col_follow else None
+            return rank, total, follow_val
+
+        cum_rank, cum_total, cum_follow = _lookup(df_hot, prefixed)
+        wk_rank, wk_total, _ = _lookup(df_weekly, prefixed)
+
+        if cum_rank is None and wk_rank is None:
+            return f"No 雪球 attention data for {ticker} (not in A-share universe, or 雪球 data unavailable)"
+
+        lines.append("## Cumulative attention (累计关注度排行):")
+        if cum_rank is not None:
+            cum_pct = round((cum_rank / cum_total) * 100, 1)
+            follow_str = str(int(cum_follow)) if cum_follow is not None and not pd.isna(cum_follow) else "N/A"
+            lines.append(f"- 关注数: {follow_str}")
+            lines.append(f"- 雪球排名: #{cum_rank} of {cum_total} (top {cum_pct}% of A-share universe)")
+        else:
+            lines.append("- Not found in 最热门 list")
+
+        lines.append("")
+        lines.append("## Weekly new attention (本周新增):")
+        if wk_rank is not None:
+            wk_pct = round((wk_rank / wk_total) * 100, 1)
+            lines.append(f"- 周新增排名: #{wk_rank} of {wk_total} (top {wk_pct}%)")
+        else:
+            lines.append("- Not found in 本周新增 list")
+
+        lines.append("")
+        lines.append(
+            "Interpretation: 雪球 is the dominant CN-mainland equity-investor social platform "
+            "(most similar to StockTwits). Cumulative rank reflects long-term investor interest; "
+            "weekly rank reveals current narrative momentum. A stock with low cumulative rank "
+            "(most-watched) AND high weekly rank delta = recent attention spike."
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error: unexpected 雪球 attention response for {ticker}: {type(exc).__name__}: {str(exc)[:120]}"
 
 
 def _strip_akshare_from_chain(value: str, default: str) -> str:

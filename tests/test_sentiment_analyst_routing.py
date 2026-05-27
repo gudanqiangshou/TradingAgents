@@ -1,8 +1,8 @@
 """Tests for market-aware routing in sentiment_analyst.py.
 
 Verifies that:
-- US/crypto tickers route to StockTwits (not eastmoney)
-- A-share/HK tickers route to eastmoney (not StockTwits)
+- US/crypto tickers route to StockTwits + Google Trends (not eastmoney, not A-share blocks)
+- A-share/HK tickers route to eastmoney (not StockTwits); A-share also gets 4 extra blocks
 - Both blocks are always passed to the prompt template with appropriate placeholders
 """
 
@@ -37,13 +37,22 @@ def _make_state(ticker: str, trade_date: str = "2026-05-21") -> dict:
     }
 
 
+# Shared patch context for all the new imports
+_COMMON_PATCHES = [
+    "tradingagents.agents.analysts.sentiment_analyst.fetch_reddit_posts",
+    "tradingagents.agents.analysts.sentiment_analyst.get_news",
+    "tradingagents.agents.analysts.sentiment_analyst.build_instrument_context",
+    "tradingagents.agents.analysts.sentiment_analyst.get_language_instruction",
+]
+
+
 # ---------------------------------------------------------------------------
 # US ticker → StockTwits called; eastmoney NOT called
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
 def test_us_ticker_routes_to_stocktwits():
-    """AAPL → fetch_stocktwits_messages called; get_social_sentiment NOT called."""
+    """AAPL → fetch_stocktwits_messages called; get_social_sentiment NOT called; google_trends called."""
     llm, chain = _make_llm_mock()
 
     with (
@@ -59,6 +68,16 @@ def test_us_ticker_routes_to_stocktwits():
               return_value=""),
         patch("tradingagents.agents.analysts.sentiment_analyst.get_language_instruction",
               return_value=""),
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_google_trends",
+              return_value="google trends data") as mock_gt,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_zt_pool_summary",
+              return_value="zt data") as mock_zt,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_hot_up_rank",
+              return_value="hot up data") as mock_hu,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_lhb_summary",
+              return_value="lhb data") as mock_lhb,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_xueqiu_attention",
+              return_value="xueqiu data") as mock_xq,
     ):
         from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
         node = create_sentiment_analyst(llm)
@@ -67,6 +86,11 @@ def test_us_ticker_routes_to_stocktwits():
 
     mock_st.assert_called_once()
     mock_em.assert_not_called()
+    mock_gt.assert_called_once()  # Google Trends called for US
+    mock_zt.assert_not_called()   # A-share-only blocks NOT called
+    mock_hu.assert_not_called()
+    mock_lhb.assert_not_called()
+    mock_xq.assert_not_called()
 
     # The call to fetch_stocktwits_messages had AAPL as the ticker
     args = mock_st.call_args
@@ -118,7 +142,7 @@ def test_us_ticker_eastmoney_block_is_placeholder():
 
 @pytest.mark.unit
 def test_a_share_routes_to_eastmoney():
-    """600519 → get_social_sentiment called; fetch_stocktwits_messages NOT called."""
+    """600519 → get_social_sentiment called; fetch_stocktwits_messages NOT called; all 4 A-share blocks called."""
     llm, chain = _make_llm_mock()
 
     with (
@@ -134,6 +158,16 @@ def test_a_share_routes_to_eastmoney():
               return_value=""),
         patch("tradingagents.agents.analysts.sentiment_analyst.get_language_instruction",
               return_value=""),
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_google_trends",
+              return_value="gt data") as mock_gt,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_zt_pool_summary",
+              return_value="zt data") as mock_zt,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_hot_up_rank",
+              return_value="hot up data") as mock_hu,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_lhb_summary",
+              return_value="lhb data") as mock_lhb,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_xueqiu_attention",
+              return_value="xueqiu data") as mock_xq,
     ):
         from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
         node = create_sentiment_analyst(llm)
@@ -141,6 +175,12 @@ def test_a_share_routes_to_eastmoney():
 
     mock_em.assert_called_once()
     mock_st.assert_not_called()
+    mock_gt.assert_not_called()  # Google Trends NOT called for A-share
+    # All 4 A-share-only blocks called
+    mock_zt.assert_called_once()
+    mock_hu.assert_called_once()
+    mock_lhb.assert_called_once()
+    mock_xq.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +189,7 @@ def test_a_share_routes_to_eastmoney():
 
 @pytest.mark.unit
 def test_hk_routes_to_eastmoney():
-    """0700.HK → get_social_sentiment called; fetch_stocktwits_messages NOT called."""
+    """0700.HK → get_social_sentiment called; fetch_stocktwits_messages NOT called; A-share-only blocks NOT called."""
     llm, chain = _make_llm_mock()
 
     with (
@@ -165,6 +205,16 @@ def test_hk_routes_to_eastmoney():
               return_value=""),
         patch("tradingagents.agents.analysts.sentiment_analyst.get_language_instruction",
               return_value=""),
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_google_trends",
+              return_value="gt data") as mock_gt,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_zt_pool_summary",
+              return_value="zt data") as mock_zt,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_hot_up_rank",
+              return_value="hot up data") as mock_hu,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_lhb_summary",
+              return_value="lhb data") as mock_lhb,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_xueqiu_attention",
+              return_value="xueqiu data") as mock_xq,
     ):
         from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
         node = create_sentiment_analyst(llm)
@@ -172,6 +222,12 @@ def test_hk_routes_to_eastmoney():
 
     mock_em.assert_called_once()
     mock_st.assert_not_called()
+    mock_gt.assert_not_called()  # Google Trends NOT called for HK
+    # A-share-only blocks NOT called for HK — just placeholders
+    mock_zt.assert_not_called()
+    mock_hu.assert_not_called()
+    mock_lhb.assert_not_called()
+    mock_xq.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +236,7 @@ def test_hk_routes_to_eastmoney():
 
 @pytest.mark.unit
 def test_crypto_routes_to_stocktwits():
-    """BTC-USD → fetch_stocktwits_messages called; get_social_sentiment NOT called."""
+    """BTC-USD → fetch_stocktwits_messages called; get_social_sentiment NOT called; google_trends called (non-CN/HK)."""
     llm, chain = _make_llm_mock()
 
     with (
@@ -196,6 +252,16 @@ def test_crypto_routes_to_stocktwits():
               return_value=""),
         patch("tradingagents.agents.analysts.sentiment_analyst.get_language_instruction",
               return_value=""),
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_google_trends",
+              return_value="gt data") as mock_gt,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_zt_pool_summary",
+              return_value="zt data") as mock_zt,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_hot_up_rank",
+              return_value="hot up data") as mock_hu,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_lhb_summary",
+              return_value="lhb data") as mock_lhb,
+        patch("tradingagents.agents.analysts.sentiment_analyst.get_xueqiu_attention",
+              return_value="xueqiu data") as mock_xq,
     ):
         from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
         node = create_sentiment_analyst(llm)
@@ -203,3 +269,8 @@ def test_crypto_routes_to_stocktwits():
 
     mock_st.assert_called_once()
     mock_em.assert_not_called()
+    mock_gt.assert_called_once()   # Google Trends called for CRYPTO (non-CN/HK)
+    mock_zt.assert_not_called()    # A-share-only blocks NOT called for crypto
+    mock_hu.assert_not_called()
+    mock_lhb.assert_not_called()
+    mock_xq.assert_not_called()

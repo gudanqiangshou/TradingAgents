@@ -30,7 +30,14 @@ from tradingagents.agents.utils.agent_utils import (
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 from tradingagents.market_resolver import resolve_market, Market
-from tradingagents.dataflows.akshare_china import get_social_sentiment
+from tradingagents.dataflows.akshare_china import (
+    get_social_sentiment,
+    get_zt_pool_summary,
+    get_hot_up_rank,
+    get_lhb_summary,
+    get_xueqiu_attention,
+)
+from tradingagents.dataflows.google_trends import get_google_trends
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -57,22 +64,42 @@ def create_sentiment_analyst(llm):
         news_block = get_news.func(ticker, start_date, end_date)
         reddit_block = fetch_reddit_posts(ticker)
 
-        # Route social sentiment by market: StockTwits (US equities only) vs
+        # Route social sentiment by market: StockTwits/Google Trends (US/crypto) vs
         # Eastmoney 个股热度 (A-share / HK).  Both blocks are always passed to
         # the prompt template; the unused one carries an informative placeholder.
         _market = resolve_market(ticker)
+        # curr_date: use trade_date (analysis date) for historical accuracy.
+        # TODO: if sentiment_analyst_node is ever refactored to take a signature
+        #   parameter, wire curr_date through properly. For now, use end_date
+        #   (the trade_date from state) which is accurate for non-backtest runs.
+        curr_date = end_date
+
         if _market in (Market.A_SHARE, Market.HK):
             stocktwits_block = (
                 "<stocktwits not queried: ticker is a non-US listing "
                 "(A-share / HK); CN/HK retail signal is in the eastmoney_social_block below>"
             )
             eastmoney_social_block = get_social_sentiment(ticker)
+            google_trends_block = "<google trends not queried: ticker is a non-US listing>"
         else:
             stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
             eastmoney_social_block = (
                 "<eastmoney social not queried: ticker is a non-CN/HK listing; "
                 "US/crypto retail signal is in the stocktwits_block above>"
             )
+            google_trends_block = get_google_trends(ticker, lookback_days=30, geo="US")
+
+        # A-share-only blocks
+        if _market == Market.A_SHARE:
+            zt_pool_block = get_zt_pool_summary(curr_date)
+            hot_up_block = get_hot_up_rank()
+            lhb_block = get_lhb_summary(ticker, curr_date, days_back=5)
+            xueqiu_block = get_xueqiu_attention(ticker)
+        else:
+            zt_pool_block = "<涨停板 not applicable: A-share only>"
+            hot_up_block = "<飙升榜 not applicable: A-share only>"
+            lhb_block = "<龙虎榜 not applicable: A-share only>"
+            xueqiu_block = "<雪球 attention not applicable: A-share only>"
 
         system_message = _build_system_message(
             ticker=ticker,
@@ -82,6 +109,11 @@ def create_sentiment_analyst(llm):
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
             eastmoney_social_block=eastmoney_social_block,
+            zt_pool_block=zt_pool_block,
+            hot_up_block=hot_up_block,
+            lhb_block=lhb_block,
+            xueqiu_block=xueqiu_block,
+            google_trends_block=google_trends_block,
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -124,9 +156,14 @@ def _build_system_message(
     stocktwits_block: str,
     reddit_block: str,
     eastmoney_social_block: str,
+    zt_pool_block: str = "<涨停板 not applicable: A-share only>",
+    hot_up_block: str = "<飙升榜 not applicable: A-share only>",
+    lhb_block: str = "<龙虎榜 not applicable: A-share only>",
+    xueqiu_block: str = "<雪球 attention not applicable: A-share only>",
+    google_trends_block: str = "<google trends not queried: ticker is a non-US listing>",
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
-    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
+    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
 
@@ -159,6 +196,31 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 {reddit_block}
 <end_of_reddit>
 
+### A-share 涨停板 池 (retail FOMO snapshot for this trading day)
+<start_of_zt_pool>
+{zt_pool_block}
+<end_of_zt_pool>
+
+### A-share attention 飙升榜 (stocks suddenly trending in retail attention)
+<start_of_hot_up>
+{hot_up_block}
+<end_of_hot_up>
+
+### A-share 龙虎榜 (large-fund / hot-money desk transactions — hard capital flow signal)
+<start_of_lhb>
+{lhb_block}
+<end_of_lhb>
+
+### 雪球 attention rank (CN retail social — most-similar to StockTwits)
+<start_of_xueqiu>
+{xueqiu_block}
+<end_of_xueqiu>
+
+### Google Trends interest (US retail search-attention signal)
+<start_of_google_trends>
+{google_trends_block}
+<end_of_google_trends>
+
 ## How to analyze this data (best practices)
 
 1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone.
@@ -179,12 +241,22 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 
 9. **When the eastmoney_social_block contains a Retail attention rank section (i.e., the ticker is A-share or HK), use the rank-direction signal: rising attention often precedes price moves both ways; combine with news to judge whether the attention is positive or negative narrative.**
 
+10. **A-share 涨停板:** If the analyzed ticker is in today's 涨停板, that's a strong FOMO signal; if NOT but sector peers are in 涨停板, a narrative tailwind may still exist.
+
+11. **A-share 飙升榜:** Sudden appearance signals an attention spike (positive or negative); always cross-reference the 涨跌幅 sign to determine direction of the narrative.
+
+12. **A-share 龙虎榜:** This is a "hard signal" — large-fund net buy/sell is directly visible via real capital flows; the 解读 field reveals whether activity was institutional vs hot-money desk.
+
+13. **雪球 attention:** Percentile rank — top 1% (rank ≤ ~56 of 5604) = mainstream CN retail focus; high weekly rank delta = current momentum surge. Low cumulative rank AND high weekly rank = recent attention spike.
+
+14. **Google Trends:** Rising trend is a leading retail-attention indicator; sharp peaks often coincide with news events — compare with news flow to disambiguate positive vs negative narrative.
+
 ## Output
 
 Produce a sentiment report covering, in order:
 
 1. **Overall sentiment direction** — Bullish / Bearish / Neutral / Mixed — with a brief confidence note based on data quality and sample size.
-2. **Source-by-source breakdown** — what each of news / StockTwits / Reddit is telling you, with specific evidence (cite message counts, ratios, notable posts).
+2. **Source-by-source breakdown** — what each of news / StockTwits / Reddit / A-share attention signals (where applicable) is telling you, with specific evidence (cite message counts, ratios, notable posts).
 3. **Divergences, alignments, and key narratives** across sources.
 4. **Catalysts and risks** surfaced by the data.
 5. **Markdown table** at the end summarizing key sentiment signals, their direction, source, and supporting evidence.
