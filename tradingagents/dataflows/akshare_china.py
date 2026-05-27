@@ -1574,43 +1574,44 @@ def get_hot_up_rank() -> str:
             return "<飙升榜 暂不可用： empty rank list from eastmoney>"
         # rank_data items have keys: sc (e.g. "SH600519"), rk (current rank), hrc (rank change vs yesterday)
 
-        # Step 2: GET prices for those tickers via push2.eastmoney.com
-        # Build secids: SH→"1.<code>", SZ→"0.<code>"
-        marks = []
-        for item in rank_data:
-            sc = item.get("sc", "")
-            if isinstance(sc, str) and len(sc) >= 8:
-                marks.append(("0." if "SZ" in sc else "1.") + sc[2:])
-        if not marks:
-            return "<飙升榜 暂不可用： no valid sc codes from rank list>"
-        secids = ",".join(marks) + ",?v=08926209912590994"
-        price_url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
-        price_params = {
-            "ut": "f057cbcbce2a86e2866ab8877db1d059",
+        # Step 2: GET full-market A-share spot via clist endpoint
+        # (ulist.np is blocked from overseas IPs; clist on same subdomain works and
+        # returns the same f12/f14/f2/f3 schema)
+        spot_url = "https://push2.eastmoney.com/api/qt/clist/get"
+        spot_params = {
+            "pn": "1",
+            "pz": "10000",  # large enough to cover all A-share (~5400 rows)
+            "po": "1",
+            "np": "1",
             "fltt": "2",
             "invt": "2",
-            "fields": "f14,f3,f12,f2",
-            "secids": secids,
+            "fid": "f3",  # sort by 涨跌幅 (irrelevant, just need data)
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",  # 深主板+创业板+沪主板+科创板+北交所
+            "fields": "f12,f14,f2,f3",  # 代码 / 名称 / 最新价 / 涨跌幅
         }
         price_resp = _eastmoney_http_retry(
-            lambda: sess.get(price_url, params=price_params, timeout=10)
+            lambda: sess.get(spot_url, params=spot_params, timeout=10)
         )
         if price_resp.status_code != 200:
-            return f"<飙升榜 暂不可用： price endpoint HTTP {price_resp.status_code}>"
+            return f"<飙升榜 暂不可用：spot endpoint HTTP {price_resp.status_code}>"
         price_json = price_resp.json()
         price_diff = (
             (price_json.get("data") or {}).get("diff", [])
             if isinstance(price_json, dict) else []
         )
         if not isinstance(price_diff, list) or not price_diff:
-            return "<飙升榜 暂不可用： empty price list from push2>"
+            return "<飙升榜 暂不可用：spot 列表为空>"
 
-        # Step 3: merge rank_data + price_diff into a single DataFrame
-        # rank_data: sc, rk, hrc (and we use sc as the key)
-        # price_diff: f12=代码, f14=股票名称, f2=最新价, f3=涨跌幅
+        # Build code → spot row dict for fast lookup
         price_by_code = {
-            row.get("f12"): row for row in price_diff if isinstance(row, dict) and row.get("f12")
+            row.get("f12"): row
+            for row in price_diff
+            if isinstance(row, dict) and row.get("f12")
         }
+
+        # Step 3: merge rank_data + price_by_code into a single DataFrame
+        # rank_data: sc, rk, hrc (and we use sc as the key)
+        # price_by_code: f12=代码, f14=股票名称, f2=最新价, f3=涨跌幅
         rows_out = []
         for item in rank_data:
             sc = item.get("sc", "")

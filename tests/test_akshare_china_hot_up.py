@@ -167,7 +167,7 @@ def test_hot_up_rank_endpoint_returns_string():
 
 @pytest.mark.unit
 def test_hot_up_price_endpoint_non_200():
-    """POST OK, GET returns 503 → price endpoint unavailable string."""
+    """POST OK, GET returns 503 → spot endpoint unavailable string."""
     rank_data = _make_rank_data(5)
     rank_response = {"data": rank_data}
 
@@ -182,12 +182,12 @@ def test_hot_up_price_endpoint_non_200():
         out = ac.get_hot_up_rank()
 
     assert "503" in out
-    assert "unavailable" in out or "飙升榜" in out
+    assert "spot endpoint" in out or "飙升榜" in out
 
 
 @pytest.mark.unit
 def test_hot_up_price_endpoint_empty_diff():
-    """POST OK, GET returns {"data": {"diff": []}} → empty price list unavailable."""
+    """POST OK, GET returns {"data": {"diff": []}} → spot 列表为空 unavailable."""
     rank_data = _make_rank_data(5)
     rank_response = {"data": rank_data}
     price_response = {"data": {"diff": []}}
@@ -197,7 +197,7 @@ def test_hot_up_price_endpoint_empty_diff():
         out = ac.get_hot_up_rank()
 
     assert isinstance(out, str)
-    assert "unavailable" in out or "飙升榜" in out
+    assert "spot 列表为空" in out or "飙升榜" in out
 
 
 # ---------------------------------------------------------------------------
