@@ -375,8 +375,8 @@ def section_d_stocktwits() -> SectionResult:
 
     # Build display: Top 5 with our own header (not the Top 20 header from raw_md)
     top5_numbered = sorted(parsed, key=lambda x: x[0])[:5]
-    from datetime import datetime as _dt
-    now_utc = _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    from datetime import datetime as _dt, timezone as _tz
+    now_utc = _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
     display_lines = [f"🇺🇸 StockTwits 美股热议榜 — Top 5（获取于 {now_utc} UTC）"]
     for i, (_, ticker, rest) in enumerate(top5_numbered, 1):
         display_lines.append(f"{i}. {ticker} {rest}")
