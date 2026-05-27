@@ -31,13 +31,11 @@ FIXED_AGENTS = [
     "Portfolio Manager",
 ]
 
-SIGNAL_ACTION_MAP = {
-    "Buy": "BUY",
-    "Overweight": "BUY",
-    "Hold": "HOLD",
-    "Underweight": "SELL",
-    "Sell": "SELL",
-}
+# Re-export so existing `from web.state_tracker import SIGNAL_ACTION_MAP` keeps
+# working (web/app.py + tests/web/test_state_tracker.py + tests/web/test_app.py).
+# Real definition lives in tradingagents/agents/utils/rating.py — single source
+# of truth with the 5-tier vocabulary.
+from tradingagents.agents.utils.rating import SIGNAL_ACTION_MAP  # noqa: F401
 
 
 @dataclass
