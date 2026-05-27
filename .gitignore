@@ -223,3 +223,6 @@ __marimo__/
 
 # Web analysis history / runtime reports (private, not for the public fork)
 reports/
+
+# Superpowers brainstorm/working state — local-only
+.superpowers/
