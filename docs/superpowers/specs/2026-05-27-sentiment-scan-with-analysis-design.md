@@ -70,7 +70,7 @@ related_memory:
   "scan_completed_at": "06:31:08",
   "analysis_started_at": "06:31:08",
   "analysis_completed_at": "08:42:13",
-  "analysis_budget_exhausted": false,        // true 表示 08:50 截止前未跑完
+  "analysis_budget_exhausted": false,        // iff any analyses[].status == "budget_exhausted"
   "sections": {
     "section_a": {                            // 复用 SectionResult NamedTuple → dict
       "display": "...",                       // 原 stdout-friendly 文本，push 直接用
@@ -108,8 +108,8 @@ related_memory:
         "status": "ok"                        // ok | partial | error
       },
       "decision": {
-        "action": "BUY",
-        "rating": "Overweight",
+        "rating": "Overweight",               // SignalProcessor → parse_rating() 5-tier: Buy/Overweight/Hold/Underweight/Sell (LLM-faithful)
+        "action": "BUY",                      // SIGNAL_ACTION_MAP[rating] 3-tier collapse: Buy/Overweight→BUY, Hold→HOLD, Underweight/Sell→SELL
         "summary_1line": "..."                // 抽自 final_trade_decision 的 Executive Summary 首句
       },
       "elapsed_seconds": 612,
@@ -117,6 +117,9 @@ related_memory:
     }
   ]
 }
+```
+
+注：`analysis_budget_exhausted` (top-level) **iff** `any(a["status"] == "budget_exhausted" for a in analyses)`。两者必须保持一致（push 逻辑单一真相）。
 ```
 
 `analyses[].status` 取值与推送呈现规则：
@@ -142,6 +145,18 @@ tradingagents/sentiment_scan/               # 新包
     feishu_post_v2.py                       # build_feishu_post(snapshot, date) → post payload
 ```
 
+### Prerequisite refactor: 把 `SIGNAL_ACTION_MAP` 搬到 rating.py
+
+当前 `SIGNAL_ACTION_MAP`（`Buy/Overweight → BUY`、`Hold → HOLD`、`Underweight/Sell → SELL` 的 5→3 collapse 字典）住在 `web/state_tracker.py:34-40`，但语义属于 rating utilities — 移到 `tradingagents/agents/utils/rating.py` 与 `RATINGS_5_TIER`、`parse_rating()` 同居作为单一真相。
+
+变更：
+- 在 `tradingagents/agents/utils/rating.py` 顶部新增 `SIGNAL_ACTION_MAP = {...}` 常量
+- `web/state_tracker.py` 删除原定义，改为 `from tradingagents.agents.utils.rating import SIGNAL_ACTION_MAP`
+- `web/app.py:48` 既有 `from web.state_tracker import ... SIGNAL_ACTION_MAP` 不动（re-export 仍生效），语义零变化
+- 触动 web 包但只是行号位移与 import path，**不影响 baseline 78 测试语义**
+
+`sentiment_scan/analysis_runner.py` 通过 `from tradingagents.agents.utils.rating import SIGNAL_ACTION_MAP` 拿到，**不依赖 web 包**（保持"分析进程不走 web"约束）。
+
 ### `fundamentals_snapshot.py`
 
 `fetch_structured_fundamentals(ticker: str) -> dict`
@@ -159,9 +174,10 @@ tradingagents/sentiment_scan/               # 新包
 
 ```python
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.dataflows.interface import apply_china_vendor_overlay
+from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay  # 真实位置, 不在 interface.py
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.signal_processing import SignalProcessor
+from tradingagents.agents.utils.rating import SIGNAL_ACTION_MAP                # 见 Modules 节: 本变更将该常量从 web 迁到 rating.py
 
 config = DEFAULT_CONFIG.copy()                  # env vars 已通过 DEFAULT_CONFIG 自动注入
 config["max_debate_rounds"] = 1                 # 最快
@@ -188,9 +204,11 @@ final_decision_md = (final_state or {}).get("final_trade_decision") or ""
 if not final_decision_md:
     return {"status": "incomplete", ...}
 
-raw_signal = SignalProcessor().process_signal(final_decision_md)   # "BUY"/"HOLD"/"SELL"
-# 整体 try/except 包死所有异常 → status="error"
+rating = SignalProcessor().process_signal(final_decision_md)    # 5-tier: Buy/Overweight/Hold/Underweight/Sell
+action = SIGNAL_ACTION_MAP.get(rating, "HOLD")                  # 3-tier: BUY/HOLD/SELL
 ```
+
+**整个函数体（包含所有 import、`apply_china_vendor_overlay`、`TradingAgentsGraph` 构造、stream 迭代、rating 抽取）必须包在外层 `try/except Exception as exc` 中，任何异常都 → `{"status": "error", "error": str(exc)[:200], ...}`。** `apply_china_vendor_overlay` 对未知 ticker 形态可能抛（虽然按 vendor 公开方法契约不应抛，但 `apply_china_vendor_overlay` 不在那个契约范围内）。
 
 调用方负责 `del graph; gc.collect()`。
 
@@ -260,13 +278,17 @@ A 股 ticker 6 位码继续 link 到 `xueqiu.com/S/{prefix}{code}`；StockTwits 
 
 | Flag 组合 | 行为 |
 |---|---|
-| 无 flag（与 `--no-feishu` / `--feishu-only` 组合） | **现状不变** — 跑扫描 + stdout + 直推飞书 |
+| 无 flag（与 `--no-feishu` / `--feishu-only` 组合） | **现状不变** — 跑扫描 + stdout + 直推飞书（与 LaunchAgent 当前用法一致）|
 | `--analyze [--date YYYY-MM-DD] [--output PATH]` | 跑扫描 + 跑分析 + atomic write JSON。**不**推飞书。|
 | `--push [--date YYYY-MM-DD] [--input PATH] [--no-feishu]` | 读 JSON + 重组飞书 post + 推。**不**跑扫描或分析。|
 
 默认 JSON 路径：`~/.tradingagents/sentiment-scan/<DATE>.json`（环境变量 `TRADINGAGENTS_SENTIMENT_SCAN_DIR` 可覆盖）。
 
-`--analyze` 与 `--push` 互斥；与现有 `--no-feishu`/`--feishu-only` 在 push 子模式下复用。
+Flag 互斥与组合语义：
+- `--analyze` 与 `--push` 互斥 — 同时传 → argparse 拒绝
+- `--push --no-feishu`: 读 JSON 但不推（dry-run，用于本地验证 payload 形态）
+- `--push --feishu-only`: 与 push 语义冗余（`--push` 本来就不写 stdout），CLI 拒绝该组合
+- `--analyze` 下 `--no-feishu` / `--feishu-only` 都被 CLI 拒绝（`--analyze` 本来就不推飞书）
 
 ## Tests
 
@@ -280,13 +302,14 @@ A 股 ticker 6 位码继续 link 到 `xueqiu.com/S/{prefix}{code}`；StockTwits 
   - akshare 异常 → status="error"
   - 5 种坏输入永不抛（None / "" / "INVALID" / list / int）
 
-- `test_analysis_runner.py` (~6 tests)
-  - mock graph stream 返完整 final_state → status="ok"，action/rating 抽取正确
+- `test_analysis_runner.py` (~7 tests)
+  - mock graph stream 返完整 final_state → status="ok"，rating=5-tier 抽取正确，action=3-tier 来自 SIGNAL_ACTION_MAP[rating]
   - mock graph 中途 deadline 到 → status="timeout"
   - mock graph 跑完但 final_trade_decision="" → status="incomplete"
-  - mock graph 抛 → status="error"
-  - apply_china_vendor_overlay 被调（A 股 ticker 验证 akshare 路由）
-  - per-ticker gc.collect 验证
+  - mock graph 抛 → status="error"，error message 截断到 200 字符
+  - `apply_china_vendor_overlay` 被调（mock target = `tradingagents.sentiment_scan.analysis_runner.apply_china_vendor_overlay`，匹配新 import path；A 股 ticker 验证 akshare 路由）
+  - `apply_china_vendor_overlay` 抛 → 外层 try 兜住 → status="error"（覆盖 reviewer 提的 advisory）
+  - per-ticker `del graph; gc.collect()` 验证（mock gc.collect）
 
 - `test_snapshot_io.py` (~4 tests)
   - round-trip (write → read = identity)
