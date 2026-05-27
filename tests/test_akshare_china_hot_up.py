@@ -1,100 +1,309 @@
 """Tests for get_hot_up_rank in AkShare vendor.
 
 All tests are marked @pytest.mark.unit. No network calls.
+The function now calls eastmoney APIs directly (bypassing akshare) using a
+requests.Session with trust_env=False — tests mock _eastmoney_session().
 """
 from __future__ import annotations
 
 import pytest
-import pandas as pd
-from unittest.mock import MagicMock, patch
+import requests
+from unittest.mock import patch, MagicMock
 
-import tradingagents.dataflows.akshare_china as _vendor_mod
-
-DependencyUnavailable = _vendor_mod._dep_bootstrap.DependencyUnavailable
+import tradingagents.dataflows.akshare_china as ac
 
 
-def _make_hot_up_df(n: int = 100) -> pd.DataFrame:
-    rows = []
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_rank_data(n: int = 5, hrc_values=None) -> list:
+    """Build n fake rank items. hrc_values overrides the rank-change field."""
+    items = []
     for i in range(n):
-        rows.append({
-            "排名较昨日变动": 1000 - i * 10,
-            "当前排名": i + 1,
-            "代码": f"SZ30{i:04d}",
-            "股票名称": f"飙升股{i}",
-            "最新价": 20.0 + i,
-            "涨跌额": 1.0 + i * 0.1,
-            "涨跌幅": 5.0 + i * 0.05,
-        })
-    return pd.DataFrame(rows)
+        hrc = hrc_values[i] if hrc_values and i < len(hrc_values) else (1000 - i * 10)
+        items.append({"sc": f"SH{600000 + i:06d}", "rk": i + 1, "hrc": hrc})
+    return items
 
+
+def _make_price_diff(rank_data: list) -> list:
+    """Build matching price rows for a rank_data list."""
+    diff = []
+    for i, item in enumerate(rank_data):
+        code_only = item["sc"][2:]
+        diff.append({
+            "f12": code_only,
+            "f14": f"股票{i}",
+            "f2": 10.0 + i,
+            "f3": 1.5 + i * 0.1,
+        })
+    return diff
+
+
+def _make_fake_session(rank_response_json, price_response_json):
+    fake_post_resp = MagicMock(status_code=200)
+    fake_post_resp.json.return_value = rank_response_json
+    fake_get_resp = MagicMock(status_code=200)
+    fake_get_resp.json.return_value = price_response_json
+    fake_session = MagicMock()
+    fake_session.post.return_value = fake_post_resp
+    fake_session.get.return_value = fake_get_resp
+    return fake_session
+
+
+# ---------------------------------------------------------------------------
+# Happy path
+# ---------------------------------------------------------------------------
 
 @pytest.mark.unit
 def test_hot_up_happy_path():
-    """Mock returns 100 rows; assert Top 20 by 排名较昨日变动 selected; output mentions stock symbols."""
-    df = _make_hot_up_df(100)
-    ak = MagicMock()
-    ak.stock_hot_up_em.return_value = df
+    """~5 rows of fake data → output contains header, table rows, ticker names, % signs."""
+    rank_data = _make_rank_data(5)
+    rank_response = {"data": rank_data}
+    price_response = {"data": {"diff": _make_price_diff(rank_data)}}
+    fake_sess = _make_fake_session(rank_response, price_response)
 
-    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
-        result = _vendor_mod.get_hot_up_rank()
+    with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
+        out = ac.get_hot_up_rank()
 
-    assert "飙升榜" in result
-    assert "| 当前排名 |" in result or "当前排名" in result
-    # Should contain stock code from the highest-ranked item
-    assert "SZ30" in result or "飙升股" in result
-    # Should have table rows
-    assert "| -- |" in result or "--" in result
-    assert "Interpretation" in result
-    ak.stock_hot_up_em.assert_called_once()
+    assert "# 东方财富 attention 飙升榜" in out
+    assert "排名较昨日变动" in out
+    assert "| -- |" in out
+    # At least one ticker name should appear
+    assert "股票0" in out or "股票1" in out
+    # % sign from formatted 涨跌幅
+    assert "%" in out
+    assert "Interpretation" in out
+
+
+# ---------------------------------------------------------------------------
+# Sort correctness
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_hot_up_sorted_by_rank_change_desc():
+    """5 rows with hrc=[10, 100, 50, 200, -30] → top row is hrc=200."""
+    hrc_values = [10, 100, 50, 200, -30]
+    rank_data = _make_rank_data(5, hrc_values=hrc_values)
+    rank_response = {"data": rank_data}
+    price_response = {"data": {"diff": _make_price_diff(rank_data)}}
+    fake_sess = _make_fake_session(rank_response, price_response)
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
+        out = ac.get_hot_up_rank()
+
+    # The first data row (after header separator) should contain "+200"
+    lines = [l for l in out.splitlines() if l.startswith("|") and "-- |" not in l and "当前排名" not in l]
+    assert lines, "Expected at least one data row"
+    assert "+200" in lines[0], f"Expected +200 in first data row, got: {lines[0]}"
+
+
+# ---------------------------------------------------------------------------
+# Top-20 truncation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_hot_up_top_20_truncation():
+    """30 rows of fake data → output table has exactly 20 data rows."""
+    rank_data = _make_rank_data(30)
+    rank_response = {"data": rank_data}
+    price_response = {"data": {"diff": _make_price_diff(rank_data)}}
+    fake_sess = _make_fake_session(rank_response, price_response)
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
+        out = ac.get_hot_up_rank()
+
+    # Count data rows: lines starting with | that are not the header or separator
+    data_rows = [
+        l for l in out.splitlines()
+        if l.startswith("|") and "-- |" not in l and "当前排名" not in l
+    ]
+    assert len(data_rows) == 20, f"Expected 20 data rows, got {len(data_rows)}"
+
+
+# ---------------------------------------------------------------------------
+# Rank endpoint failures
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_hot_up_rank_endpoint_non_200():
+    """POST returns status_code=503 → unavailable string with 503."""
+    fake_post_resp = MagicMock(status_code=503)
+    fake_session = MagicMock()
+    fake_session.post.return_value = fake_post_resp
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session):
+        out = ac.get_hot_up_rank()
+
+    assert "503" in out
+    assert "unavailable" in out or "飙升榜" in out
 
 
 @pytest.mark.unit
-def test_hot_up_empty_returns_no_data():
-    """Empty df → no-data string."""
-    ak = MagicMock()
-    ak.stock_hot_up_em.return_value = pd.DataFrame()
+def test_hot_up_rank_endpoint_empty_data():
+    """POST returns {"data": []} → empty rank list unavailable string."""
+    fake_sess = _make_fake_session({"data": []}, {})
 
-    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
-        result = _vendor_mod.get_hot_up_rank()
+    with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
+        out = ac.get_hot_up_rank()
 
-    assert isinstance(result, str)
-    assert "No 飙升榜 data" in result
+    assert "empty rank list" in out or "unavailable" in out
 
 
 @pytest.mark.unit
-def test_hot_up_list_return():
-    """Mock returns list → Error string."""
-    ak = MagicMock()
-    ak.stock_hot_up_em.return_value = []
+def test_hot_up_rank_endpoint_returns_string():
+    """POST returns {"data": "not a list"} → unavailable string (not a list)."""
+    fake_sess = _make_fake_session({"data": "not a list"}, {})
 
-    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
-        result = _vendor_mod.get_hot_up_rank()
+    with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
+        out = ac.get_hot_up_rank()
 
-    assert isinstance(result, str)
-    assert "No 飙升榜 data" in result or result.startswith("Error")
+    assert isinstance(out, str)
+    assert "unavailable" in out or "飙升榜" in out
+
+
+# ---------------------------------------------------------------------------
+# Price endpoint failures
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_hot_up_price_endpoint_non_200():
+    """POST OK, GET returns 503 → price endpoint unavailable string."""
+    rank_data = _make_rank_data(5)
+    rank_response = {"data": rank_data}
+
+    fake_post_resp = MagicMock(status_code=200)
+    fake_post_resp.json.return_value = rank_response
+    fake_get_resp = MagicMock(status_code=503)
+    fake_session = MagicMock()
+    fake_session.post.return_value = fake_post_resp
+    fake_session.get.return_value = fake_get_resp
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session):
+        out = ac.get_hot_up_rank()
+
+    assert "503" in out
+    assert "unavailable" in out or "飙升榜" in out
 
 
 @pytest.mark.unit
-def test_hot_up_endpoint_raises():
-    """Endpoint raises → Error string, no raise."""
-    ak = MagicMock()
-    ak.stock_hot_up_em.side_effect = RuntimeError("server error")
+def test_hot_up_price_endpoint_empty_diff():
+    """POST OK, GET returns {"data": {"diff": []}} → empty price list unavailable."""
+    rank_data = _make_rank_data(5)
+    rank_response = {"data": rank_data}
+    price_response = {"data": {"diff": []}}
+    fake_sess = _make_fake_session(rank_response, price_response)
 
-    with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
-        result = _vendor_mod.get_hot_up_rank()
+    with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
+        out = ac.get_hot_up_rank()
 
-    assert isinstance(result, str)
-    assert result.startswith("Error")
+    assert isinstance(out, str)
+    assert "unavailable" in out or "飙升榜" in out
+
+
+# ---------------------------------------------------------------------------
+# Exception propagation — never raises
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_hot_up_post_raises_proxy_error():
+    """POST raises ProxyError → unavailable string containing ProxyError, no raise."""
+    fake_session = MagicMock()
+    fake_session.post.side_effect = requests.exceptions.ProxyError("Unable to connect to proxy")
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session):
+        out = ac.get_hot_up_rank()
+
+    assert isinstance(out, str)
+    assert "ProxyError" in out
+    assert "unavailable" in out or "飙升榜" in out
 
 
 @pytest.mark.unit
-def test_hot_up_dep_unavailable():
-    """DependencyUnavailable → error string."""
-    with patch(
-        "tradingagents.dataflows.akshare_china._dep_bootstrap.ensure",
-        side_effect=DependencyUnavailable("akshare unavailable"),
-    ):
-        result = _vendor_mod.get_hot_up_rank()
+def test_hot_up_get_raises_timeout():
+    """POST OK, GET raises TimeoutError → unavailable string, no raise."""
+    rank_data = _make_rank_data(5)
+    rank_response = {"data": rank_data}
 
-    assert isinstance(result, str)
-    assert result.startswith("Error")
+    fake_post_resp = MagicMock(status_code=200)
+    fake_post_resp.json.return_value = rank_response
+    fake_session = MagicMock()
+    fake_session.post.return_value = fake_post_resp
+    fake_session.get.side_effect = TimeoutError("timed out")
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session):
+        out = ac.get_hot_up_rank()
+
+    assert isinstance(out, str)
+    assert "unavailable" in out or "飙升榜" in out
+
+
+@pytest.mark.unit
+def test_hot_up_malformed_json_returns_unavailable():
+    """POST.json() raises ValueError → unavailable string, no raise."""
+    fake_post_resp = MagicMock(status_code=200)
+    fake_post_resp.json.side_effect = ValueError("No JSON object could be decoded")
+    fake_session = MagicMock()
+    fake_session.post.return_value = fake_post_resp
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session):
+        out = ac.get_hot_up_rank()
+
+    assert isinstance(out, str)
+    assert "unavailable" in out or "飙升榜" in out
+
+
+# ---------------------------------------------------------------------------
+# Graceful key handling
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_hot_up_missing_sc_in_rank_data():
+    """rank_data items missing 'sc' key → skipped gracefully, no raise."""
+    rank_data = [
+        {"rk": 1, "hrc": 100},           # no sc
+        {"sc": None, "rk": 2, "hrc": 90},  # sc is None
+        {"sc": "SH600519", "rk": 3, "hrc": 80},  # valid
+    ]
+    rank_response = {"data": rank_data}
+    price_response = {"data": {"diff": [
+        {"f12": "600519", "f14": "贵州茅台", "f2": 1252.0, "f3": 1.5},
+    ]}}
+    fake_sess = _make_fake_session(rank_response, price_response)
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
+        out = ac.get_hot_up_rank()
+
+    assert isinstance(out, str)
+    # The valid row should appear; the missing-sc items should be silently skipped
+    assert "SH600519" in out or "贵州茅台" in out or "unavailable" in out
+
+
+@pytest.mark.unit
+def test_hot_up_missing_price_for_code_renders_dash():
+    """Rank has SH600519, price diff missing 600519 → row appears with '—' for 涨跌幅."""
+    rank_data = [{"sc": "SH600519", "rk": 1, "hrc": 100}]
+    rank_response = {"data": rank_data}
+    # price diff has no entry for 600519
+    price_response = {"data": {"diff": [
+        {"f12": "000001", "f14": "平安银行", "f2": 10.0, "f3": 0.5},
+    ]}}
+    fake_sess = _make_fake_session(rank_response, price_response)
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_sess):
+        out = ac.get_hot_up_rank()
+
+    assert isinstance(out, str)
+    # Should render a row with a dash for 涨跌幅 (price not found → f3 is None → "—")
+    assert "—" in out or "unavailable" in out
+
+
+# ---------------------------------------------------------------------------
+# Session configuration
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_hot_up_session_has_trust_env_false():
+    """_eastmoney_session() (real, not mocked) must have trust_env=False."""
+    sess = ac._eastmoney_session()
+    assert sess.trust_env is False

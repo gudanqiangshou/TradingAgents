@@ -1395,6 +1395,22 @@ def _safe_str(value) -> str:
     return str(value).strip()
 
 
+def _eastmoney_session():
+    """A requests.Session with trust_env=False to bypass macOS system-level
+    proxy configuration. The user's machine has a system proxy that wrongly
+    routes push2.eastmoney.com and a few other eastmoney sub-domains to a
+    foreign proxy returning ProxyError. trust_env=False forces direct
+    connection. Use this for any direct eastmoney HTTP call from this module.
+    Returns a configured Session with a desktop UA + JSON Accept header.
+    """
+    import requests
+    s = requests.Session()
+    s.trust_env = False
+    s.headers["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)"
+    s.headers["Accept"] = "application/json, text/plain, */*"
+    return s
+
+
 # ---------------------------------------------------------------------------
 # A. 涨停板 pool summary
 # ---------------------------------------------------------------------------
@@ -1504,66 +1520,123 @@ def get_zt_pool_summary(curr_date: str) -> str:
 # ---------------------------------------------------------------------------
 
 def get_hot_up_rank() -> str:
-    """Return 东方财富 attention 飙升榜 (top 20 by rank improvement).
+    """A-share retail-attention 飙升榜: top 20 stocks with largest day-over-day
+    rank improvement on Eastmoney 股吧 (个股人气榜). Directly calls eastmoney
+    APIs (bypassing akshare) so it can use trust_env=False to avoid the macOS
+    system-proxy issue that breaks push2.eastmoney.com.
 
-    Returns
-    -------
-    str
-        Formatted plaintext. Fail-safe: never raises.
+    Returns formatted markdown table. Fail-safe: never raises; any failure
+    returns an informative placeholder string.
     """
     try:
-        ak = _dep_bootstrap.ensure("akshare")
-    except _dep_bootstrap.DependencyUnavailable as exc:
-        return f"Error: A-share data source unavailable ({exc})"
+        sess = _eastmoney_session()
+        # Step 1: GET ranking changes (POST endpoint)
+        rank_url = "https://emappdata.eastmoney.com/stockrank/getAllHisRcList"
+        rank_payload = {
+            "appId": "appId01",
+            "globalId": "786e4c21-70dc-435a-93bb-38",
+            "marketType": "",
+            "pageNo": 1,
+            "pageSize": 100,
+        }
+        rank_resp = sess.post(rank_url, json=rank_payload, timeout=10)
+        if rank_resp.status_code != 200:
+            return f"<飙升榜 unavailable: rank endpoint HTTP {rank_resp.status_code}>"
+        rank_json = rank_resp.json()
+        rank_data = rank_json.get("data") if isinstance(rank_json, dict) else None
+        if not isinstance(rank_data, list) or not rank_data:
+            return "<飙升榜 unavailable: empty rank list from eastmoney>"
+        # rank_data items have keys: sc (e.g. "SH600519"), rk (current rank), hrc (rank change vs yesterday)
 
-    try:
-        df = ak.stock_hot_up_em()
-    except Exception as exc:
-        return f"Error: failed to fetch 飙升榜 data: {type(exc).__name__}: {str(exc)[:120]}"
-
-    if _df_is_empty(df):
-        return "No 飙升榜 data available"
-
-    try:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        col_delta = next((c for c in df.columns if "较昨日" in c or "变动" in c), None)
-        col_rank = next((c for c in df.columns if "当前排名" in c), None)
-        col_code = next((c for c in df.columns if c in ("代码", "股票代码")), None)
-        col_name = next((c for c in df.columns if c in ("名称", "股票名称")), None)
-        col_pct = next((c for c in df.columns if "涨跌幅" in c), None)
-
-        if col_delta:
-            df_sorted = df.copy()
-            df_sorted["_delta_num"] = pd.to_numeric(df_sorted[col_delta], errors="coerce").fillna(-999999)
-            df_sorted = df_sorted.sort_values("_delta_num", ascending=False).head(20)
-        else:
-            df_sorted = df.head(20)
-
-        lines = [
-            "# 东方财富 attention 飙升榜 (top 20 stocks with largest day-over-day rank improvement)",
-            f"# Retrieved at: {now_str}",
-            "",
-            "| 当前排名 | 排名较昨日变动 | 代码 | 名称 | 涨跌幅 |",
-            "| -- | -- | -- | -- | -- |",
-        ]
-
-        for _, row in df_sorted.iterrows():
-            rank = _safe_str(row.get(col_rank, "N/A")) if col_rank else "N/A"
-            delta = _safe_str(row.get(col_delta, "N/A")) if col_delta else "N/A"
-            code = _safe_str(row.get(col_code, "N/A")) if col_code else "N/A"
-            name = _safe_str(row.get(col_name, "N/A")) if col_name else "N/A"
-            pct = _safe_str(row.get(col_pct, "N/A")) if col_pct else "N/A"
-            lines.append(f"| {rank} | {delta} | {code} | {name} | {pct} |")
-
-        lines.append("")
-        lines.append(
-            "Interpretation: Stocks here have suddenly become topics of retail attention. "
-            "Combined with 涨跌幅 direction, indicates breakout/breakdown narratives forming."
+        # Step 2: GET prices for those tickers via push2.eastmoney.com
+        # Build secids: SH→"1.<code>", SZ→"0.<code>"
+        marks = []
+        for item in rank_data:
+            sc = item.get("sc", "")
+            if isinstance(sc, str) and len(sc) >= 8:
+                marks.append(("0." if "SZ" in sc else "1.") + sc[2:])
+        if not marks:
+            return "<飙升榜 unavailable: no valid sc codes from rank list>"
+        secids = ",".join(marks) + ",?v=08926209912590994"
+        price_url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+        price_params = {
+            "ut": "f057cbcbce2a86e2866ab8877db1d059",
+            "fltt": "2",
+            "invt": "2",
+            "fields": "f14,f3,f12,f2",
+            "secids": secids,
+        }
+        price_resp = sess.get(price_url, params=price_params, timeout=10)
+        if price_resp.status_code != 200:
+            return f"<飙升榜 unavailable: price endpoint HTTP {price_resp.status_code}>"
+        price_json = price_resp.json()
+        price_diff = (
+            (price_json.get("data") or {}).get("diff", [])
+            if isinstance(price_json, dict) else []
         )
-        return "\n".join(lines)
-    except Exception as exc:
-        return f"Error: unexpected 飙升榜 response: {type(exc).__name__}: {str(exc)[:120]}"
+        if not isinstance(price_diff, list) or not price_diff:
+            return "<飙升榜 unavailable: empty price list from push2>"
+
+        # Step 3: merge rank_data + price_diff into a single DataFrame
+        # rank_data: sc, rk, hrc (and we use sc as the key)
+        # price_diff: f12=代码, f14=股票名称, f2=最新价, f3=涨跌幅
+        price_by_code = {
+            row.get("f12"): row for row in price_diff if isinstance(row, dict) and row.get("f12")
+        }
+        rows_out = []
+        for item in rank_data:
+            sc = item.get("sc", "")
+            if not isinstance(sc, str) or len(sc) < 8:
+                continue
+            code_only = sc[2:]  # strip "SH"/"SZ" prefix
+            price_row = price_by_code.get(code_only, {})
+            rows_out.append({
+                "代码": sc,
+                "股票名称": price_row.get("f14", ""),
+                "最新价": price_row.get("f2"),
+                "涨跌幅": price_row.get("f3"),
+                "当前排名": item.get("rk"),
+                "排名较昨日变动": item.get("hrc"),
+            })
+
+        # Sort by 排名较昨日变动 desc, take top 20
+        df = pd.DataFrame(rows_out)
+        df["排名较昨日变动"] = pd.to_numeric(df["排名较昨日变动"], errors="coerce")
+        df["当前排名"] = pd.to_numeric(df["当前排名"], errors="coerce")
+        df["涨跌幅"] = pd.to_numeric(df["涨跌幅"], errors="coerce")
+        df = df.dropna(subset=["排名较昨日变动"]).sort_values("排名较昨日变动", ascending=False).head(20)
+
+        if df.empty:
+            return "<飙升榜 unavailable: no rows after merge>"
+
+        from datetime import datetime as _dt
+        header = (
+            "# 东方财富 attention 飙升榜 (top 20 by 排名较昨日变动)\n"
+            f"# Retrieved at: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            "| 当前排名 | 排名较昨日变动 | 代码 | 名称 | 涨跌幅 |\n"
+            "| -- | -- | -- | -- | -- |"
+        )
+        rows = []
+        for _, r in df.iterrows():
+            chg = r["涨跌幅"]
+            chg_str = f"{chg:+.2f}%" if pd.notna(chg) else "—"
+            rank_now = r["当前排名"]
+            rank_now_str = f"{int(rank_now)}" if pd.notna(rank_now) else "—"
+            rank_chg = r["排名较昨日变动"]
+            rank_chg_str = f"{'+' if rank_chg >= 0 else ''}{int(rank_chg)}"
+            rows.append(
+                f"| {rank_now_str} | {rank_chg_str} | {r['代码']} | {r['股票名称']} | {chg_str} |"
+            )
+        return (
+            header + "\n" + "\n".join(rows) + "\n\n"
+            "Interpretation: Stocks here have suddenly become topics of retail attention. "
+            "Combined with 涨跌幅 direction, indicates breakout/breakdown narratives forming. "
+            "Cross-reference with the same-board peers in 涨停板 or the 龙虎榜 to confirm "
+            "if a sector-wide narrative is in motion."
+        )
+    except Exception as e:
+        logger.warning("飙升榜 fetch failed: %s", e)
+        return f"<飙升榜 unavailable: {type(e).__name__}: {str(e)[:120]}>"
 
 
 # ---------------------------------------------------------------------------
