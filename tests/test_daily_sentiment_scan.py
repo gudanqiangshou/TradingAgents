@@ -13,11 +13,15 @@ import pytest
 # Ensure scripts/ is importable as a module by adding project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from scripts.daily_sentiment_scan import (
+    SectionResult,
     build_report,
     section_a_hot_up_rank,
+    section_b_lhb,
     section_b_lhb_top5,
     section_c_xueqiu_surge,
+    section_d_stocktwits,
     section_d_stocktwits_trending,
+    section_e_intersection,
     convert_to_feishu_post,
     main,
     _A_SHARE_PREFIXED_RE,
@@ -73,6 +77,45 @@ def _make_xueqiu_weekly_df(codes, follows=None):
     })
 
 
+def _make_sec_a(codes=None, rank_by_code=None, summary_by_code=None):
+    """Build a minimal SectionResult for section A."""
+    codes = codes or []
+    rank_by_code = rank_by_code or {c: i + 1 for i, c in enumerate(codes)}
+    summary_by_code = summary_by_code or {c: f"{c} 飙升 +100 位" for c in codes}
+    return SectionResult(
+        display="🚀 section_a mock",
+        top20_codes=codes,
+        rank_by_code=rank_by_code,
+        summary_by_code=summary_by_code,
+    )
+
+
+def _make_sec_b(codes=None, rank_by_code=None, summary_by_code=None):
+    """Build a minimal SectionResult for section B."""
+    codes = codes or []
+    rank_by_code = rank_by_code or {c: i + 1 for i, c in enumerate(codes)}
+    summary_by_code = summary_by_code or {c: f"{c} · 净买入+1.00亿" for c in codes}
+    return SectionResult(
+        display="🐂 section_b mock",
+        top20_codes=codes,
+        rank_by_code=rank_by_code,
+        summary_by_code=summary_by_code,
+    )
+
+
+def _make_sec_c(codes=None, rank_by_code=None, summary_by_code=None):
+    """Build a minimal SectionResult for section C."""
+    codes = codes or []
+    rank_by_code = rank_by_code or {c: i + 1 for i, c in enumerate(codes)}
+    summary_by_code = summary_by_code or {c: f"{c} 本周#1 累计#100 飙升+99" for c in codes}
+    return SectionResult(
+        display="📈 section_c mock",
+        top20_codes=codes,
+        rank_by_code=rank_by_code,
+        summary_by_code=summary_by_code,
+    )
+
+
 # ---------------------------------------------------------------------------
 # test_build_report_all_sources_succeed
 # ---------------------------------------------------------------------------
@@ -80,19 +123,28 @@ def _make_xueqiu_weekly_df(codes, follows=None):
 @pytest.mark.unit
 def test_build_report_all_sources_succeed():
     """All 4 sources mocked to succeed; report has all expected keywords."""
+    mock_sec_a = _make_sec_a(["000001"])
+    mock_sec_b = _make_sec_b(["600519"])
+    mock_sec_c = _make_sec_c(["300750"])
+    mock_sec_d = SectionResult(
+        display="🇺🇸 StockTwits Trending Equities — Top 1\n1. AAPL NASDAQ · Apple Inc",
+        top20_codes=["AAPL"], rank_by_code={"AAPL": 1}, summary_by_code={"AAPL": "NASDAQ · Apple Inc"},
+    )
     with (
-        patch("scripts.daily_sentiment_scan.get_hot_up_rank", return_value="🚀 东方财富 attention 飙升榜 — Top 20\n🔥 SZ000001 平安银行 · 排名 #100 (飙升 +200 位) · +2.50%"),
-        patch("scripts.daily_sentiment_scan.section_b_lhb_top5", return_value="🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n🐂 600519 贵州茅台 · 净买入 +5.00亿"),
-        patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value="📈 雪球飙升榜 — 散户讨论排名突然蹿升的新晋热门 Top 15\n🔥 SH605066 天正电气 · 本周#5 vs 累计#300 (飙升 +295)"),
-        patch("scripts.daily_sentiment_scan.fetch_stocktwits_trending", return_value="🇺🇸 StockTwits Trending Equities — Top 1 (retrieved 2026-05-27 09:00:00 UTC)\n1. AAPL NASDAQ · Apple Inc"),
+        patch("scripts.daily_sentiment_scan.section_a_hot_up_rank", return_value=mock_sec_a),
+        patch("scripts.daily_sentiment_scan.section_b_lhb", return_value=mock_sec_b),
+        patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value=mock_sec_c),
+        patch("scripts.daily_sentiment_scan.section_d_stocktwits", return_value=mock_sec_d),
     ):
         report = build_report("2026-05-27")
 
     assert "# 散户情绪扫盘" in report
-    assert "飙升榜" in report
-    assert "龙虎榜" in report
-    assert "雪球飙升榜" in report
+    assert "section_a mock" in report
+    assert "section_b mock" in report
+    assert "section_c mock" in report
     assert "StockTwits" in report
+    # intersection block present
+    assert "多源交集" in report
 
 
 # ---------------------------------------------------------------------------
@@ -101,18 +153,28 @@ def test_build_report_all_sources_succeed():
 
 @pytest.mark.unit
 def test_build_report_one_source_fails_others_succeed():
-    """飙升榜 raises; other 3 sections still appear in report."""
+    """飙升榜 returns empty SectionResult; other 3 sections still appear in report."""
+    failed_sec_a = SectionResult(
+        display="🚀 A 股飙升榜\n(暂不可用：RuntimeError: 网络异常)",
+        top20_codes=[], rank_by_code={}, summary_by_code={},
+    )
+    mock_sec_b = _make_sec_b(["600519"])
+    mock_sec_c = _make_sec_c(["300750"])
+    mock_sec_d = SectionResult(
+        display="🇺🇸 StockTwits Trending\n1. MSFT NASDAQ · Microsoft",
+        top20_codes=["MSFT"], rank_by_code={"MSFT": 1}, summary_by_code={"MSFT": "NASDAQ · Microsoft"},
+    )
     with (
-        patch("scripts.daily_sentiment_scan.get_hot_up_rank", side_effect=RuntimeError("网络异常")),
-        patch("scripts.daily_sentiment_scan.section_b_lhb_top5", return_value="🐂 A股 龙虎榜\n🐂 600519 贵州茅台"),
-        patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value="📈 雪球飙升榜\n🔥 SH000001 平安银行"),
-        patch("scripts.daily_sentiment_scan.fetch_stocktwits_trending", return_value="🇺🇸 StockTwits Trending\n1. MSFT NASDAQ · Microsoft"),
+        patch("scripts.daily_sentiment_scan.section_a_hot_up_rank", return_value=failed_sec_a),
+        patch("scripts.daily_sentiment_scan.section_b_lhb", return_value=mock_sec_b),
+        patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value=mock_sec_c),
+        patch("scripts.daily_sentiment_scan.section_d_stocktwits", return_value=mock_sec_d),
     ):
         report = build_report("2026-05-27")
 
-    assert "unavailable" in report or "RuntimeError" in report
-    assert "龙虎榜" in report
-    assert "雪球" in report
+    assert "unavailable" in report or "RuntimeError" in report or "暂不可用" in report
+    assert "section_b mock" in report
+    assert "section_c mock" in report
     assert "StockTwits" in report
 
 
@@ -122,20 +184,38 @@ def test_build_report_one_source_fails_others_succeed():
 
 @pytest.mark.unit
 def test_lhb_section_top5_sort_by_net_buy():
-    """section_b returns top 5 sorted by 净买额 descending."""
+    """section_b_lhb returns top 5 sorted by 净买额 descending (via display)."""
+    df = _make_lhb_df()
+    mock_ak = MagicMock()
+    mock_ak.stock_lhb_detail_em.return_value = df
+    with patch("tradingagents.dataflows._dep_bootstrap.ensure", return_value=mock_ak):
+        result = section_b_lhb("2026-05-27")
+
+    display = result.display
+    # 002594 (比亚迪, 9e8) should be first
+    lines = [l for l in display.splitlines() if l.startswith("🐂 0") or l.startswith("🐂 6") or l.startswith("🐂 3")]
+    assert len(lines) == 5
+    # First row should contain 002594 (highest net buy at 9e8)
+    assert "002594" in lines[0]
+    # 300750 (宁德时代, 8e8) second
+    assert "300750" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# test_lhb_section_top5_sort_by_net_buy (backward-compat alias)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_lhb_section_b_lhb_top5_alias():
+    """section_b_lhb_top5 (backward-compat alias) returns display string."""
     df = _make_lhb_df()
     mock_ak = MagicMock()
     mock_ak.stock_lhb_detail_em.return_value = df
     with patch("tradingagents.dataflows._dep_bootstrap.ensure", return_value=mock_ak):
         result = section_b_lhb_top5("2026-05-27")
 
-    # 002594 (比亚迪, 9e8) should be first
-    lines = [l for l in result.splitlines() if l.startswith("🐂 0") or l.startswith("🐂 6") or l.startswith("🐂 3")]
-    assert len(lines) == 5
-    # First row should contain 002594 (highest net buy at 9e8)
-    assert "002594" in lines[0]
-    # 300750 (宁德时代, 8e8) second
-    assert "300750" in lines[1]
+    assert isinstance(result, str)
+    assert "龙虎榜" in result
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +229,10 @@ def test_section_b_lhb_dedupes_by_code():
     mock_ak = MagicMock()
     mock_ak.stock_lhb_detail_em.return_value = df
     with patch("tradingagents.dataflows._dep_bootstrap.ensure", return_value=mock_ak):
-        result = section_b_lhb_top5("2026-05-27")
+        result = section_b_lhb("2026-05-27")
 
-    lines = [l for l in result.splitlines() if l.startswith("🐂 0") or l.startswith("🐂 6")]
+    display = result.display
+    lines = [l for l in display.splitlines() if l.startswith("🐂 0") or l.startswith("🐂 6")]
     assert len(lines) == 2, f"Expected 2 deduped lines, got {len(lines)}: {lines}"
     # 京东方A appears once with summed net buy (3e8+2e8+1e8=6e8 > 5e8 for 茅台)
     kjf_lines = [l for l in lines if "000725" in l or "京东方" in l]
@@ -160,6 +241,26 @@ def test_section_b_lhb_dedupes_by_code():
     assert "6.00" in kjf_lines[0], f"Expected summed 6.00亿, got: {kjf_lines[0]}"
     # Check N=3 times listed
     assert "3 次" in kjf_lines[0] or "3次" in kjf_lines[0], f"Expected '3 次' in line: {kjf_lines[0]}"
+
+
+# ---------------------------------------------------------------------------
+# test_section_b_top20_codes_populated
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_section_b_top20_codes_populated():
+    """section_b_lhb returns SectionResult with top20_codes populated."""
+    df = _make_lhb_df()
+    mock_ak = MagicMock()
+    mock_ak.stock_lhb_detail_em.return_value = df
+    with patch("tradingagents.dataflows._dep_bootstrap.ensure", return_value=mock_ak):
+        result = section_b_lhb("2026-05-27")
+
+    assert isinstance(result, SectionResult)
+    assert len(result.top20_codes) == 7  # 7 unique codes in df
+    assert "002594" in result.top20_codes   # highest net buy → rank 1
+    assert result.rank_by_code["002594"] == 1
+    assert "002594" in result.summary_by_code
 
 
 # ---------------------------------------------------------------------------
@@ -188,10 +289,14 @@ def test_xueqiu_surge_top15_computes_rank_delta():
             _XUEQIU_CACHE.pop("最热门", None)
             _XUEQIU_CACHE.pop("本周新增", None)
 
-    assert "📈 雪球飙升榜" in result
+    assert isinstance(result, SectionResult)
+    assert "📈 雪球飙升榜" in result.display
     # SH900100: hot_rank=51, weekly_rank=1, surge=50
-    assert "SH900100" in result
-    assert "飙升 +50" in result
+    assert "SH900100" in result.display
+    assert "飙升 +50" in result.display
+    # top20_codes should contain bare code "900100"
+    assert "900100" in result.top20_codes
+    assert result.rank_by_code.get("900100") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -219,8 +324,11 @@ def test_xueqiu_surge_filters_megacaps():
             _XUEQIU_CACHE.pop("最热门", None)
             _XUEQIU_CACHE.pop("本周新增", None)
 
+    assert isinstance(result, SectionResult)
+    display = result.display
     # All filtered out (hot_rank <=50) → "无新晋飙升标的" or empty
-    assert "无新晋飙升标的" in result or "老热门主导" in result or "📈 雪球飙升榜" in result
+    assert "无新晋飙升标的" in display or "老热门主导" in display or "📈 雪球飙升榜" in display
+    assert result.top20_codes == []
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +359,13 @@ def test_xueqiu_surge_top15_sort_desc():
             _XUEQIU_CACHE.pop("最热门", None)
             _XUEQIU_CACHE.pop("本周新增", None)
 
+    assert isinstance(result, SectionResult)
     # First 🔥 line should be SH900099 (highest surge)
-    fire_lines = [l for l in result.splitlines() if l.startswith("🔥")]
-    assert fire_lines, f"Expected 🔥 lines, got: {result}"
+    fire_lines = [l for l in result.display.splitlines() if l.startswith("🔥")]
+    assert fire_lines, f"Expected 🔥 lines, got: {result.display}"
     assert "SH900099" in fire_lines[0], f"Expected SH900099 first, got: {fire_lines[0]}"
+    # top20_codes: SH900099 bare = "900099" at rank 1
+    assert result.top20_codes[0] == "900099"
 
 
 # ---------------------------------------------------------------------------
@@ -468,3 +579,117 @@ def test_no_feishu_flag_skips_post_even_if_env_set():
             sys.argv = ["daily_sentiment_scan.py", "--no-feishu"]
             main()
             mock_post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestIntersection
+# ---------------------------------------------------------------------------
+
+class TestIntersection:
+
+    @pytest.mark.unit
+    def test_three_source_hit(self):
+        """Three A-share sections overlap on code '000001' → ⭐ 三源命中 line present."""
+        sec_a = _make_sec_a(["000001", "600519", "300750"])
+        sec_b = _make_sec_b(["000001", "000858", "601318"])
+        sec_c = _make_sec_c(["000001", "002594", "600036"])
+        result = section_e_intersection(sec_a, sec_b, sec_c)
+        assert "⭐ 三源命中" in result
+        assert "000001" in result
+
+    @pytest.mark.unit
+    def test_a_b_only_hit(self):
+        """A∩B non-empty, C disjoint → 飙升榜 ∩ 龙虎榜 block has the code."""
+        sec_a = _make_sec_a(["000001", "600519"])
+        sec_b = _make_sec_b(["000001", "300750"])
+        sec_c = _make_sec_c(["002594", "600036"])  # disjoint
+        result = section_e_intersection(sec_a, sec_b, sec_c)
+        assert "飙升榜 ∩ 龙虎榜" in result
+        assert "000001" in result
+        assert "三源命中" not in result
+
+    @pytest.mark.unit
+    def test_a_c_only_hit(self):
+        """A∩C non-empty, B disjoint → 飙升榜 ∩ 雪球飙升 block has the code."""
+        sec_a = _make_sec_a(["000001", "600519"])
+        sec_b = _make_sec_b(["300750", "000858"])  # disjoint
+        sec_c = _make_sec_c(["000001", "002594"])
+        result = section_e_intersection(sec_a, sec_b, sec_c)
+        assert "飙升榜 ∩ 雪球飙升" in result
+        assert "000001" in result
+
+    @pytest.mark.unit
+    def test_b_c_only_hit(self):
+        """B∩C non-empty, A disjoint → 龙虎榜 ∩ 雪球飙升 block has the code."""
+        sec_a = _make_sec_a(["600519", "300750"])  # disjoint
+        sec_b = _make_sec_b(["000001", "000858"])
+        sec_c = _make_sec_c(["000001", "002594"])
+        result = section_e_intersection(sec_a, sec_b, sec_c)
+        assert "龙虎榜 ∩ 雪球飙升" in result
+        assert "000001" in result
+
+    @pytest.mark.unit
+    def test_no_intersection(self):
+        """All 3 sets disjoint → (本日无多源命中标的) line."""
+        sec_a = _make_sec_a(["000001"])
+        sec_b = _make_sec_b(["600519"])
+        sec_c = _make_sec_c(["300750"])
+        result = section_e_intersection(sec_a, sec_b, sec_c)
+        assert "本日无多源命中标的" in result
+
+    @pytest.mark.unit
+    def test_intersection_skips_when_section_fails(self):
+        """sec_a is empty (failure) → intersection still works with sec_b ∩ sec_c only."""
+        sec_a = SectionResult(
+            display="🚀 A 股飙升榜\n(暂不可用：无数据)",
+            top20_codes=[], rank_by_code={}, summary_by_code={},
+        )
+        sec_b = _make_sec_b(["000001", "600519"])
+        sec_c = _make_sec_c(["000001", "300750"])
+        result = section_e_intersection(sec_a, sec_b, sec_c)
+        # sec_a empty, so no triple or A∩B or A∩C; only B∩C possible
+        assert "龙虎榜 ∩ 雪球飙升" in result
+        assert "000001" in result
+
+    @pytest.mark.unit
+    def test_all_empty_returns_no_hit(self):
+        """All three sections empty → (本日无多源命中标的)."""
+        sec_a = SectionResult(display="", top20_codes=[], rank_by_code={}, summary_by_code={})
+        sec_b = SectionResult(display="", top20_codes=[], rank_by_code={}, summary_by_code={})
+        sec_c = SectionResult(display="", top20_codes=[], rank_by_code={}, summary_by_code={})
+        result = section_e_intersection(sec_a, sec_b, sec_c)
+        assert "本日无多源命中标的" in result
+
+
+# ---------------------------------------------------------------------------
+# test_feishu_payload_includes_intersection_section
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_feishu_payload_includes_intersection_section():
+    """Intersection block in report → convert_to_feishu_post includes it in content."""
+    # Build a small report with a known intersection code
+    sec_a = _make_sec_a(["000001"])
+    sec_b = _make_sec_b(["000001"])
+    sec_c = _make_sec_c(["000001"])
+    intersection_block = section_e_intersection(sec_a, sec_b, sec_c)
+
+    # The intersection_block should contain ⭐ 三源命中 and 000001
+    assert "三源命中" in intersection_block
+    assert "000001" in intersection_block
+
+    # Build a minimal markdown report that includes the intersection block
+    sample_md = (
+        "# 散户情绪扫盘 — 2026-05-27\n"
+        "\n"
+        + intersection_block + "\n"
+    )
+    payload = convert_to_feishu_post(sample_md, "2026-05-27")
+
+    # All text elements combined should mention intersection
+    all_text = " ".join(
+        e.get("text", "") or ""
+        for para in payload["content"]["post"]["zh_cn"]["content"]
+        for e in para
+    )
+    assert "多源交集" in all_text or "三源命中" in all_text

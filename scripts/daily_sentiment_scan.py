@@ -19,11 +19,12 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 import pandas as pd
 
 from tradingagents.dataflows.akshare_china import (
-    get_hot_up_rank,
+    fetch_hot_up_rank_data,
     _get_xueqiu_cached,
     _XUEQIU_CACHE,
     _df_is_empty,
@@ -32,23 +33,68 @@ from tradingagents.dataflows.stocktwits import fetch_stocktwits_trending
 
 
 # ---------------------------------------------------------------------------
-# Section A — 飙升榜
+# SectionResult type
 # ---------------------------------------------------------------------------
 
-def section_a_hot_up_rank() -> str:
-    """飙升榜 — 散户突然涌入的标的."""
+class SectionResult(NamedTuple):
+    display: str
+    top20_codes: list  # bare 6-digit codes for A-share sources; ticker symbols for US
+    rank_by_code: dict  # bare code → rank within this section (1-20)
+    summary_by_code: dict  # bare code → concise per-source info string
+
+
+# ---------------------------------------------------------------------------
+# Section A — 飙升榜 (内部 Top 20, 显示 Top 5)
+# ---------------------------------------------------------------------------
+
+def section_a_hot_up_rank() -> SectionResult:
+    """飙升榜: 内部 Top 20, 显示 Top 5."""
     try:
-        return get_hot_up_rank()
+        data = fetch_hot_up_rank_data()
     except Exception as exc:
-        return f"(暂不可用： {type(exc).__name__}: {str(exc)[:120]})"
+        return SectionResult(
+            display=f"🚀 A 股飙升榜\n(暂不可用：{type(exc).__name__}: {str(exc)[:120]})",
+            top20_codes=[], rank_by_code={}, summary_by_code={},
+        )
+    if not data:
+        return SectionResult(
+            display="🚀 A 股飙升榜\n(暂不可用：无数据)",
+            top20_codes=[], rank_by_code={}, summary_by_code={},
+        )
+    # data is list of dicts sorted desc by hrc, up to 20 entries
+    top5 = data[:5]
+    lines = [
+        "🚀 A 股关注度飙升榜 — Top 5（来自东方财富，按昨日排名变动降序）",
+    ]
+    for d in top5:
+        chg = d.get("chg_pct")
+        chg_str = f"{chg:+.2f}%" if chg is not None else "—"
+        rank_now = d.get("rank")
+        rank_now_str = f"{rank_now}" if rank_now is not None else "—"
+        lines.append(
+            f"🔥 {d['code_prefixed']} {d['name']} · 排名 #{rank_now_str} "
+            f"(飙升 +{d['hrc']} 位) · {chg_str}"
+        )
+    top20_codes = [d["code_bare"] for d in data[:20]]
+    rank_by_code = {d["code_bare"]: i + 1 for i, d in enumerate(data[:20])}
+    summary_by_code = {
+        d["code_bare"]: f"{d['name']} 飙升 +{d['hrc']} 位"
+        for d in data[:20]
+    }
+    return SectionResult(
+        display="\n".join(lines),
+        top20_codes=top20_codes,
+        rank_by_code=rank_by_code,
+        summary_by_code=summary_by_code,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Section B — 龙虎榜 Top 5 净买入 (deduplicated by code)
+# Section B — 龙虎榜 (内部 Top 20, 显示 Top 5)
 # ---------------------------------------------------------------------------
 
-def section_b_lhb_top5(curr_date: str) -> str:
-    """龙虎榜 Top 5 净买入 — 大资金动向 (dedupe by code, sum 净买额)."""
+def section_b_lhb(curr_date: str) -> SectionResult:
+    """龙虎榜: 内部 Top 20 by 净买额 (dedupe by code), 显示 Top 5."""
     try:
         from tradingagents.dataflows import _dep_bootstrap
         ak = _dep_bootstrap.ensure("akshare")
@@ -59,14 +105,20 @@ def section_b_lhb_top5(curr_date: str) -> str:
             end_date=end_dt.strftime("%Y%m%d"),
         )
         if not isinstance(df, pd.DataFrame) or df.empty:
-            return "🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n\n(无数据)"
+            return SectionResult(
+                display="🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n(无数据)",
+                top20_codes=[], rank_by_code={}, summary_by_code={},
+            )
         # Find columns
         net_col = next(
             (c for c in df.columns if "净买额" in c or "净买入" in c),
             None,
         )
         if net_col is None:
-            return "🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n\n(column 龙虎榜净买额 not found)"
+            return SectionResult(
+                display="🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n(column 龙虎榜净买额 not found)",
+                top20_codes=[], rank_by_code={}, summary_by_code={},
+            )
         col_code = next((c for c in df.columns if c in ("代码", "股票代码")), None)
         col_name = next((c for c in df.columns if c in ("名称", "股票名称")), None)
         col_date = next((c for c in df.columns if "上榜日" in c or "日期" in c), None)
@@ -76,7 +128,7 @@ def section_b_lhb_top5(curr_date: str) -> str:
         df["净买额_num"] = pd.to_numeric(df[net_col], errors="coerce")
         df = df.dropna(subset=["净买额_num"])
 
-        # Dedupe by code: aggregate
+        # Dedupe by code: aggregate top 20
         if col_code:
             def _agg_group(g):
                 agg = {
@@ -86,7 +138,6 @@ def section_b_lhb_top5(curr_date: str) -> str:
                 if col_name:
                     agg["名称"] = g[col_name].iloc[0]
                 if col_date:
-                    # Most recent date
                     try:
                         agg["最近上榜日"] = str(g[col_date].max())
                     except Exception:
@@ -96,9 +147,9 @@ def section_b_lhb_top5(curr_date: str) -> str:
                 return pd.Series(agg)
 
             grp = df.groupby(col_code).apply(_agg_group).reset_index()
-            grp = grp.sort_values("净买额_sum", ascending=False).head(5)
+            grp = grp.sort_values("净买额_sum", ascending=False).head(20)
 
-            rows = []
+            all_rows = []
             for _, r in grp.iterrows():
                 code = str(r[col_code])
                 name = str(r.get("名称", "N/A"))
@@ -106,70 +157,129 @@ def section_b_lhb_top5(curr_date: str) -> str:
                 count = int(r.get("count", 1))
                 last_date = str(r.get("最近上榜日", "N/A"))
                 reason = str(r.get("解读", ""))[:30]
-                rows.append(
-                    f"🐂 {code} {name} · 净买入 +{net_yi:.2f}亿 (上榜 {count} 次, 最近 {last_date}) · {reason}"
-                )
+                all_rows.append({
+                    "code": code,
+                    "name": name,
+                    "net_yi": net_yi,
+                    "count": count,
+                    "last_date": last_date,
+                    "reason": reason,
+                })
         else:
-            # No code column fallback: just sort and take top 5
-            top = df.sort_values("净买额_num", ascending=False).head(5)
-            rows = []
-            for _, r in top.iterrows():
+            # No code column fallback: sort and take top 20
+            top_df = df.sort_values("净买额_num", ascending=False).head(20)
+            all_rows = []
+            for _, r in top_df.iterrows():
                 name = str(r[col_name]) if col_name else "N/A"
                 date_val = str(r[col_date]) if col_date else "N/A"
                 net_yi = r["净买额_num"] / 1e8
                 reason = str(r[col_reason])[:30] if col_reason else "N/A"
-                rows.append(
-                    f"🐂 {name} · 净买入 +{net_yi:.2f}亿 (最近 {date_val}) · {reason}"
+                all_rows.append({
+                    "code": None,
+                    "name": name,
+                    "net_yi": net_yi,
+                    "count": 1,
+                    "last_date": date_val,
+                    "reason": reason,
+                })
+
+        # Build display (top 5)
+        display_rows = []
+        for r in all_rows[:5]:
+            if r["code"]:
+                display_rows.append(
+                    f"🐂 {r['code']} {r['name']} · 净买入 +{r['net_yi']:.2f}亿 "
+                    f"(上榜 {r['count']} 次, 最近 {r['last_date']}) · {r['reason']}"
+                )
+            else:
+                display_rows.append(
+                    f"🐂 {r['name']} · 净买入 +{r['net_yi']:.2f}亿 (最近 {r['last_date']}) · {r['reason']}"
                 )
 
-        return (
-            "🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n"
-            + "\n".join(rows)
+        # Build intersection data from top 20 (bare 6-digit codes only when col_code exists)
+        top20_codes = []
+        rank_by_code: dict[str, int] = {}
+        summary_by_code: dict[str, str] = {}
+        if col_code:
+            for i, r in enumerate(all_rows[:20]):
+                code = r["code"]
+                if code:
+                    top20_codes.append(code)
+                    rank_by_code[code] = i + 1
+                    summary_by_code[code] = f"{r['name']} · 净买入+{r['net_yi']:.2f}亿"
+
+        return SectionResult(
+            display=(
+                "🐂 A股 龙虎榜 — 近 5 个交易日 Top 5 净买入 (按代码聚合)\n"
+                + "\n".join(display_rows)
+            ),
+            top20_codes=top20_codes,
+            rank_by_code=rank_by_code,
+            summary_by_code=summary_by_code,
         )
     except Exception as exc:
-        return f"🐂 A股 龙虎榜\n\n(暂不可用： {type(exc).__name__}: {str(exc)[:100]})"
+        return SectionResult(
+            display=f"🐂 A股 龙虎榜\n\n(暂不可用： {type(exc).__name__}: {str(exc)[:100]})",
+            top20_codes=[], rank_by_code={}, summary_by_code={},
+        )
 
 
 # ---------------------------------------------------------------------------
-# Section C — 雪球飙升榜 (rank delta signal)
+# Backward-compat alias (tests still call section_b_lhb_top5)
 # ---------------------------------------------------------------------------
 
-def section_c_xueqiu_surge() -> str:
-    """雪球飙升榜 — 计算 "本周新增" rank vs "最热门" rank 的差值，挑出新晋飙升股。
-    一只股票在 本周新增 排名靠前但在 累计最热门 排名靠后 = 散户突然涌入讨论 = 雪球版 attention spike。
+def section_b_lhb_top5(curr_date: str) -> str:
+    """Backward-compat alias: returns display string only."""
+    return section_b_lhb(curr_date).display
+
+
+# ---------------------------------------------------------------------------
+# Section C — 雪球飙升榜 (内部 Top 20, 显示 Top 5)
+# ---------------------------------------------------------------------------
+
+def section_c_xueqiu_surge() -> SectionResult:
+    """雪球飙升: 内部 Top 20, 显示 Top 5.
+
+    Computes "本周新增" rank vs "最热门" rank delta — stocks that suddenly
+    surged in 本周新增 relative to their cumulative hot rank.
     """
     try:
         df_hot = _get_xueqiu_cached("最热门")
         df_weekly = _get_xueqiu_cached("本周新增")
         if _df_is_empty(df_hot) or _df_is_empty(df_weekly):
-            return "📈 雪球飙升榜\n(暂不可用： xueqiu data not loaded)"
+            return SectionResult(
+                display="📈 雪球飙升榜\n(暂不可用： xueqiu data not loaded)",
+                top20_codes=[], rank_by_code={}, summary_by_code={},
+            )
 
         col_sym_hot = next((c for c in df_hot.columns if "代码" in c), None)
         col_sym_weekly = next((c for c in df_weekly.columns if "代码" in c), None)
         col_name = next((c for c in df_weekly.columns if "名称" in c or "简称" in c), None)
         col_follow = next((c for c in df_weekly.columns if "关注" in c), None)
         if not col_sym_hot or not col_sym_weekly:
-            return "📈 雪球飙升榜\n(暂不可用： 代码 column not found)"
+            return SectionResult(
+                display="📈 雪球飙升榜\n(暂不可用： 代码 column not found)",
+                top20_codes=[], rank_by_code={}, summary_by_code={},
+            )
 
         # Build rank maps
         hot_rank = {row[col_sym_hot]: i + 1 for i, (_, row) in enumerate(df_hot.iterrows())}
         weekly_rank = {row[col_sym_weekly]: i + 1 for i, (_, row) in enumerate(df_weekly.iterrows())}
 
-        # For each ticker in weekly Top 200, compute surge = hot_rank - weekly_rank.
-        # Filter: only include tickers whose hot_rank > 50 (filter out old megacaps that are always hot).
+        # Compute surge for each ticker in weekly Top 200, filter hot_rank > 50
         surges = []
-        weekly_top = df_weekly.head(200)  # limit search space
+        weekly_top = df_weekly.head(200)
         for _, r in weekly_top.iterrows():
             code = r[col_sym_weekly]
             w_rank = weekly_rank.get(code)
             h_rank = hot_rank.get(code)
             if not w_rank or not h_rank:
                 continue
-            if h_rank <= 50:  # 老热门，no surge signal
+            if h_rank <= 50:
                 continue
             surge = h_rank - w_rank
             if surge <= 0:
-                continue  # 本周比累计还慢，反向退潮，跳过
+                continue
             surges.append({
                 "code": code,
                 "name": str(r[col_name]) if col_name else "",
@@ -180,13 +290,23 @@ def section_c_xueqiu_surge() -> str:
             })
 
         surges.sort(key=lambda x: x["surge"], reverse=True)
-        top = surges[:5]
+        top20 = surges[:20]
 
-        if not top:
-            return "📈 雪球飙升榜 (无新晋飙升标的，老热门主导)"
+        if not top20:
+            return SectionResult(
+                display="📈 雪球飙升榜 (无新晋飙升标的，老热门主导)",
+                top20_codes=[], rank_by_code={}, summary_by_code={},
+            )
 
-        lines = []
-        for s in top:
+        # Strip SH/SZ/BJ prefix to get bare 6-digit code for intersection
+        def _bare(code_str: str) -> str:
+            if isinstance(code_str, str) and len(code_str) >= 8 and code_str[:2].upper() in ("SH", "SZ", "BJ"):
+                return code_str[2:]
+            return code_str
+
+        # Build display (top 5)
+        lines = ["📈 雪球飙升榜 — 散户讨论排名突然蹿升的新晋热门 Top 5"]
+        for s in top20[:5]:
             follow_str = ""
             if s["follow"] is not None:
                 try:
@@ -198,24 +318,165 @@ def section_c_xueqiu_surge() -> str:
                 f"(飙升 +{s['surge']}){follow_str}"
             )
 
-        return (
-            "📈 雪球飙升榜 — 散户讨论排名突然蹿升的新晋热门 Top 5\n"
-            + "\n".join(lines)
+        # Build intersection data from top 20
+        top20_codes = [_bare(s["code"]) for s in top20]
+        rank_by_code = {_bare(s["code"]): i + 1 for i, s in enumerate(top20)}
+        summary_by_code = {
+            _bare(s["code"]): f"{s['name']} 本周#{s['weekly_rank']} 累计#{s['hot_rank']} 飙升+{s['surge']}"
+            for s in top20
+        }
+
+        return SectionResult(
+            display="\n".join(lines),
+            top20_codes=top20_codes,
+            rank_by_code=rank_by_code,
+            summary_by_code=summary_by_code,
         )
     except Exception as exc:
-        return f"📈 雪球飙升榜\n(暂不可用： {type(exc).__name__}: {str(exc)[:120]})"
+        return SectionResult(
+            display=f"📈 雪球飙升榜\n(暂不可用： {type(exc).__name__}: {str(exc)[:120]})",
+            top20_codes=[], rank_by_code={}, summary_by_code={},
+        )
 
 
 # ---------------------------------------------------------------------------
-# Section D — StockTwits Trending Top 10
+# Section D — StockTwits Top 5 (内部 Top 20 parsed, 显示 Top 5)
+# ---------------------------------------------------------------------------
+
+_ST_NUMBERED_RE = re.compile(r"^(\d+)\.\s+([A-Z]{1,5})\s+")
+
+
+def section_d_stocktwits() -> SectionResult:
+    """StockTwits: 内部 Top 20 美股 ticker, 显示 Top 5."""
+    try:
+        raw_md = fetch_stocktwits_trending(limit=20)
+    except Exception as exc:
+        return SectionResult(
+            display=f"(暂不可用： {type(exc).__name__}: {str(exc)[:120]})",
+            top20_codes=[], rank_by_code={}, summary_by_code={},
+        )
+
+    # Parse tickers from numbered lines e.g. "1. AAPL NASDAQ · Apple Inc"
+    parsed: list[tuple[int, str, str]] = []  # (line_num, ticker, rest)
+    for line in raw_md.splitlines():
+        m = _ST_NUMBERED_RE.match(line)
+        if m:
+            line_num = int(m.group(1))
+            ticker = m.group(2)
+            rest = line[m.end():].strip()
+            parsed.append((line_num, ticker, rest))
+
+    if not parsed:
+        # raw_md is an error/empty placeholder — return it as display
+        return SectionResult(
+            display=raw_md,
+            top20_codes=[], rank_by_code={}, summary_by_code={},
+        )
+
+    # Build display: Top 5 lines only, keeping the header
+    header_lines = [l for l in raw_md.splitlines() if not _ST_NUMBERED_RE.match(l) and l.strip()]
+    top5_numbered = sorted(parsed, key=lambda x: x[0])[:5]
+    display_lines = header_lines[:1]  # keep first header line
+    for line_num, ticker, rest in top5_numbered:
+        display_lines.append(f"{line_num}. {ticker} {rest}")
+
+    top20 = sorted(parsed, key=lambda x: x[0])[:20]
+    top20_codes = [ticker for _, ticker, _ in top20]
+    rank_by_code = {ticker: line_num for line_num, ticker, _ in top20}
+    summary_by_code = {ticker: rest for _, ticker, rest in top20}
+
+    return SectionResult(
+        display="\n".join(display_lines),
+        top20_codes=top20_codes,
+        rank_by_code=rank_by_code,
+        summary_by_code=summary_by_code,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section D — backward-compat function name
 # ---------------------------------------------------------------------------
 
 def section_d_stocktwits_trending() -> str:
-    """StockTwits Trending Top 10 — 美股 attention discovery."""
-    try:
-        return fetch_stocktwits_trending(limit=5)
-    except Exception as exc:
-        return f"(暂不可用： {type(exc).__name__}: {str(exc)[:120]})"
+    """StockTwits Trending Top 5 — 美股 attention discovery (backward compat)."""
+    return section_d_stocktwits().display
+
+
+# ---------------------------------------------------------------------------
+# Section E — Multi-source intersection (A股 Top 20 cross-source)
+# ---------------------------------------------------------------------------
+
+def section_e_intersection(
+    sec_a: SectionResult, sec_b: SectionResult, sec_c: SectionResult
+) -> str:
+    """多源交集 (Top 20 cross-source): 三源命中 / 双源命中 分类显示.
+    StockTwits 是美股，不参与 A股交集.
+    """
+    set_a = set(sec_a.top20_codes)
+    set_b = set(sec_b.top20_codes)
+    set_c = set(sec_c.top20_codes)
+
+    triple = set_a & set_b & set_c          # 三源命中
+    only_ab = (set_a & set_b) - set_c       # 飙升榜 ∩ 龙虎榜 only
+    only_ac = (set_a & set_c) - set_b       # 飙升榜 ∩ 雪球飙升 only
+    only_bc = (set_b & set_c) - set_a       # 龙虎榜 ∩ 雪球飙升 only
+
+    if not (triple or only_ab or only_ac or only_bc):
+        return "🌟 多源交集（A 股 Top 20 加权）\n(本日无多源命中标的)"
+
+    lines = ["🌟 多源交集（A 股 Top 20 加权）"]
+    if triple:
+        lines.append("")
+        lines.append("⭐ 三源命中（最强信号 — 散户+机构+雪球散户同向）:")
+        for code in sorted(triple, key=lambda c: sec_a.rank_by_code.get(c, 99)):
+            a_summary = sec_a.summary_by_code.get(code, "")
+            b_summary = sec_b.summary_by_code.get(code, "")
+            c_summary = sec_c.summary_by_code.get(code, "")
+            lines.append(
+                f"  ⭐ {code} — 飙升榜#{sec_a.rank_by_code.get(code, '?')} · "
+                f"龙虎榜#{sec_b.rank_by_code.get(code, '?')} · "
+                f"雪球飙升#{sec_c.rank_by_code.get(code, '?')}"
+            )
+            lines.append(
+                (f"     {a_summary} / {b_summary} / {c_summary}")[:150]
+            )
+    if only_ab:
+        lines.append("")
+        lines.append("🔥 双源命中 飙升榜 ∩ 龙虎榜 (散户 + 机构同向):")
+        for code in sorted(only_ab, key=lambda c: sec_a.rank_by_code.get(c, 99)):
+            lines.append(
+                f"  🔥 {code} — 飙升榜#{sec_a.rank_by_code.get(code, '?')} · "
+                f"龙虎榜#{sec_b.rank_by_code.get(code, '?')}"
+            )
+            lines.append(
+                (f"     {sec_a.summary_by_code.get(code, '')} / "
+                 f"{sec_b.summary_by_code.get(code, '')}")[:150]
+            )
+    if only_ac:
+        lines.append("")
+        lines.append("🔥 双源命中 飙升榜 ∩ 雪球飙升 (双源散户关注度):")
+        for code in sorted(only_ac, key=lambda c: sec_a.rank_by_code.get(c, 99)):
+            lines.append(
+                f"  🔥 {code} — 飙升榜#{sec_a.rank_by_code.get(code, '?')} · "
+                f"雪球飙升#{sec_c.rank_by_code.get(code, '?')}"
+            )
+            lines.append(
+                (f"     {sec_a.summary_by_code.get(code, '')} / "
+                 f"{sec_c.summary_by_code.get(code, '')}")[:150]
+            )
+    if only_bc:
+        lines.append("")
+        lines.append("🔥 双源命中 龙虎榜 ∩ 雪球飙升 (大资金 + 散户同向):")
+        for code in sorted(only_bc, key=lambda c: sec_b.rank_by_code.get(c, 99)):
+            lines.append(
+                f"  🔥 {code} — 龙虎榜#{sec_b.rank_by_code.get(code, '?')} · "
+                f"雪球飙升#{sec_c.rank_by_code.get(code, '?')}"
+            )
+            lines.append(
+                (f"     {sec_b.summary_by_code.get(code, '')} / "
+                 f"{sec_c.summary_by_code.get(code, '')}")[:150]
+            )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -223,23 +484,31 @@ def section_d_stocktwits_trending() -> str:
 # ---------------------------------------------------------------------------
 
 def build_report(curr_date: str) -> str:
-    """Aggregate all 4 sections into a report string."""
+    """Aggregate all sections into a report string."""
+    sec_a = section_a_hot_up_rank()
+    sec_b = section_b_lhb(curr_date)
+    sec_c = section_c_xueqiu_surge()
+    sec_d = section_d_stocktwits()
+    intersection_block = section_e_intersection(sec_a, sec_b, sec_c)
+
     sections = [
         f"# 散户情绪扫盘 — {curr_date}",
         f"_生成于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_",
         "",
-        section_a_hot_up_rank(),
+        sec_a.display,
         "",
-        section_b_lhb_top5(curr_date),
+        sec_b.display,
         "",
-        section_c_xueqiu_surge(),
+        sec_c.display,
         "",
-        section_d_stocktwits_trending(),
+        sec_d.display,
         "",
-        "━━━ 📋 多源加权（30 秒决策）━━━",
-        "• A股飙升榜 ∩ 龙虎榜机构买入 = 散户+机构同向 = 最强信号",
-        "• A股飙升榜 ∩ 雪球飙升榜 = 双源散户关注度验证 = 强信号",
-        "• A股飙升榜 ∩ 涨停板同板块 = 主题主升浪",
+        intersection_block,
+        "",
+        "━━━ 📋 多源加权（30 秒决策参考）━━━",
+        "• A 股飙升榜 ∩ 龙虎榜机构买入 = 散户+机构同向 = 最强信号",
+        "• A 股飙升榜 ∩ 雪球飙升榜 = 双源散户关注度验证 = 强信号",
+        "• 三源命中 = 飙升榜+龙虎榜+雪球同向 = 最高置信",
         "• 美股 StockTwits 热议榜 → 配 Google Trends + StockTwits 个股看多/看空",
     ]
     return "\n".join(sections)
@@ -366,9 +635,9 @@ def convert_to_feishu_post(markdown_report: str, curr_date: str) -> dict:
             continue
 
         # Track which section we're in for US ticker linking
-        if "StockTwits Trending" in stripped:
+        if "StockTwits" in stripped:
             in_stocktwits = True
-        elif stripped.startswith("🚀") or stripped.startswith("🐂") or stripped.startswith("📈") or stripped.startswith("━━"):
+        elif stripped.startswith("🚀") or stripped.startswith("🐂") or stripped.startswith("📈") or stripped.startswith("🌟") or stripped.startswith("━━"):
             in_stocktwits = False
 
         # Top-level # header (skip — used as title only)

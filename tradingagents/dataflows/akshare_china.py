@@ -1562,157 +1562,203 @@ def get_zt_pool_summary(curr_date: str) -> str:
 # B. 飙升榜 — stocks with biggest day-over-day rank improvement
 # ---------------------------------------------------------------------------
 
+def _hot_up_rank_fetch_raw() -> "tuple[str | None, list[dict]]":
+    """Internal: execute the two-step fetch for 飙升榜.
+
+    Returns (error_str, structured_data):
+    - On success: (None, list_of_up_to_20_dicts)
+    - On any failure: (error_message_str, [])
+
+    Each dict in structured_data has:
+      code_prefixed  — e.g. "SH605300"
+      code_bare      — e.g. "605300"
+      name           — stock name
+      rank           — current rank int (or None)
+      hrc            — rank-change int
+      chg_pct        — float % or None
+    """
+    sess = _eastmoney_session()
+    rank_url = "https://emappdata.eastmoney.com/stockrank/getAllHisRcList"
+    rank_payload = {
+        "appId": "appId01",
+        "globalId": "786e4c21-70dc-435a-93bb-38",
+        "marketType": "",
+        "pageNo": 1,
+        "pageSize": 100,
+    }
+    rank_resp = _eastmoney_http_retry(
+        lambda: sess.post(rank_url, json=rank_payload, timeout=10)
+    )
+    if rank_resp.status_code != 200:
+        return (f"<飙升榜 暂不可用： rank endpoint HTTP {rank_resp.status_code}>", [])
+    rank_json = rank_resp.json()
+    rank_data = rank_json.get("data") if isinstance(rank_json, dict) else None
+    if not isinstance(rank_data, list) or not rank_data:
+        return ("<飙升榜 暂不可用： empty rank list from eastmoney>", [])
+
+    sina_sess = _sina_session()
+    sina_codes = []
+    sc_to_sina = {}
+    for item in rank_data:
+        sc = item.get("sc", "")
+        if not (isinstance(sc, str) and len(sc) >= 8):
+            continue
+        prefix = sc[:2].lower()
+        code_only = sc[2:]
+        sina_code = f"{prefix}{code_only}"
+        sina_codes.append(sina_code)
+        sc_to_sina[sc] = sina_code
+
+    if not sina_codes:
+        return ("<飙升榜 暂不可用：no valid sc codes>", [])
+
+    sina_url = "https://hq.sinajs.cn/list=" + ",".join(sina_codes)
+    quote_resp = _eastmoney_http_retry(
+        lambda: sina_sess.get(sina_url, timeout=10)
+    )
+    if quote_resp.status_code != 200:
+        return (f"<飙升榜 暂不可用：Sina 行情 HTTP {quote_resp.status_code}>", [])
+
+    try:
+        body_text = quote_resp.content.decode("gb18030", errors="replace")
+    except Exception:
+        body_text = quote_resp.text
+
+    import re as _re
+    quote_by_sina_code = {}
+    for line in body_text.splitlines():
+        m = _re.match(r'var\s+hq_str_(\w+)="([^"]*)";', line)
+        if not m:
+            continue
+        sina_code = m.group(1)
+        csv = m.group(2)
+        if not csv:
+            continue
+        fields = csv.split(",")
+        if len(fields) < 4:
+            continue
+        name = fields[0]
+        try:
+            prev_close = float(fields[1])
+            current = float(fields[3])
+        except (ValueError, IndexError):
+            continue
+        if prev_close <= 0:
+            chg_pct = None
+        else:
+            chg_pct = (current - prev_close) / prev_close * 100
+        quote_by_sina_code[sina_code] = {
+            "name": name,
+            "current": current,
+            "prev_close": prev_close,
+            "chg_pct": chg_pct,
+        }
+
+    if not quote_by_sina_code:
+        return ("<飙升榜 暂不可用：Sina 行情返回为空>", [])
+
+    rows_out = []
+    for item in rank_data:
+        sc = item.get("sc", "")
+        if not isinstance(sc, str) or len(sc) < 8:
+            continue
+        sina_code = sc_to_sina.get(sc)
+        quote = quote_by_sina_code.get(sina_code, {}) if sina_code else {}
+        rows_out.append({
+            "代码": sc,
+            "股票名称": quote.get("name", ""),
+            "最新价": quote.get("current"),
+            "涨跌幅": quote.get("chg_pct"),
+            "当前排名": item.get("rk"),
+            "排名较昨日变动": item.get("hrc"),
+        })
+
+    df = pd.DataFrame(rows_out)
+    df["排名较昨日变动"] = pd.to_numeric(df["排名较昨日变动"], errors="coerce")
+    df["当前排名"] = pd.to_numeric(df["当前排名"], errors="coerce")
+    df["涨跌幅"] = pd.to_numeric(df["涨跌幅"], errors="coerce")
+    df = df.dropna(subset=["排名较昨日变动"]).sort_values("排名较昨日变动", ascending=False).head(20)
+
+    if df.empty:
+        return ("<飙升榜 暂不可用： no rows after merge>", [])
+
+    result = []
+    for _, r in df.iterrows():
+        sc = r["代码"]
+        code_bare = sc[2:] if (isinstance(sc, str) and len(sc) >= 8) else sc
+        hrc_raw = r["排名较昨日变动"]
+        rank_raw = r["当前排名"]
+        chg_raw = r["涨跌幅"]
+        result.append({
+            "code_prefixed": sc,
+            "code_bare": code_bare,
+            "name": r["股票名称"],
+            "rank": int(rank_raw) if pd.notna(rank_raw) else None,
+            "hrc": int(hrc_raw) if pd.notna(hrc_raw) else 0,
+            "chg_pct": float(chg_raw) if pd.notna(chg_raw) else None,
+        })
+    return (None, result)
+
+
+def fetch_hot_up_rank_data() -> "list[dict]":
+    """Raw data fetcher for A-share 飙升榜.
+
+    Returns a list of up to 20 dicts (sorted descending by hrc), each with:
+      code_prefixed  — e.g. "SH605300"
+      code_bare      — e.g. "605300" (bare 6-digit, no prefix)
+      name           — stock name from Sina quote (may be "" if unavailable)
+      rank           — current rank integer (int or None)
+      hrc            — rank change vs yesterday (int, descending)
+      chg_pct        — float % change or None
+
+    On any failure returns [] (never raises).  Callers that need the markdown
+    display should use get_hot_up_rank() instead.
+    """
+    try:
+        _err, data = _hot_up_rank_fetch_raw()
+        return data
+    except Exception as e:
+        logger.warning("fetch_hot_up_rank_data failed: %s", e)
+        return []
+
+
 def get_hot_up_rank() -> str:
     """A-share retail-attention 飙升榜: top 20 stocks with largest day-over-day
     rank improvement on Eastmoney 股吧 (个股人气榜). Directly calls eastmoney
     APIs (bypassing akshare) so it can use trust_env=False to avoid the macOS
     system-proxy issue that breaks push2.eastmoney.com.
 
-    Returns formatted markdown table. Fail-safe: never raises; any failure
-    returns an informative placeholder string.
+    Returns formatted markdown string (Top 20). Fail-safe: never raises; any
+    failure returns an informative placeholder string.
+
+    Thin wrapper around fetch_hot_up_rank_data() — kept for backward compat
+    with sentiment_analyst.py which expects Top 20 markdown.
     """
     try:
-        sess = _eastmoney_session()
-        # Step 1: GET ranking changes (POST endpoint)
-        rank_url = "https://emappdata.eastmoney.com/stockrank/getAllHisRcList"
-        rank_payload = {
-            "appId": "appId01",
-            "globalId": "786e4c21-70dc-435a-93bb-38",
-            "marketType": "",
-            "pageNo": 1,
-            "pageSize": 100,
-        }
-        rank_resp = _eastmoney_http_retry(
-            lambda: sess.post(rank_url, json=rank_payload, timeout=10)
-        )
-        if rank_resp.status_code != 200:
-            return f"<飙升榜 暂不可用： rank endpoint HTTP {rank_resp.status_code}>"
-        rank_json = rank_resp.json()
-        rank_data = rank_json.get("data") if isinstance(rank_json, dict) else None
-        if not isinstance(rank_data, list) or not rank_data:
-            return "<飙升榜 暂不可用： empty rank list from eastmoney>"
-        # rank_data items have keys: sc (e.g. "SH600519"), rk (current rank), hrc (rank change vs yesterday)
-
-        # Step 2: GET realtime quote via Sina (push2.eastmoney.com is server-blocked
-        # for overseas IPs across all paths). Sina returns CSV in a GB18030-encoded
-        # JS variable per ticker.
-        sina_sess = _sina_session()
-
-        # Convert step-1 sc codes (SH605300/SZ000725/BJ430047) to sina lowercase prefix.
-        sina_codes = []
-        sc_to_sina = {}  # for later lookup: SH605300 → sh605300
-        for item in rank_data:
-            sc = item.get("sc", "")
-            if not (isinstance(sc, str) and len(sc) >= 8):
-                continue
-            prefix = sc[:2].lower()  # sh / sz / bj
-            code_only = sc[2:]
-            sina_code = f"{prefix}{code_only}"
-            sina_codes.append(sina_code)
-            sc_to_sina[sc] = sina_code
-
-        if not sina_codes:
-            return "<飙升榜 暂不可用：no valid sc codes>"
-
-        sina_url = "https://hq.sinajs.cn/list=" + ",".join(sina_codes)
-        quote_resp = _eastmoney_http_retry(
-            lambda: sina_sess.get(sina_url, timeout=10)
-        )
-        if quote_resp.status_code != 200:
-            return f"<飙升榜 暂不可用：Sina 行情 HTTP {quote_resp.status_code}>"
-
-        try:
-            body_text = quote_resp.content.decode("gb18030", errors="replace")
-        except Exception:
-            body_text = quote_resp.text
-
-        # Parse: each line is `var hq_str_<symbol>="<csv>";`
-        import re as _re
-        quote_by_sina_code = {}
-        for line in body_text.splitlines():
-            m = _re.match(r'var\s+hq_str_(\w+)="([^"]*)";', line)
-            if not m:
-                continue
-            sina_code = m.group(1)
-            csv = m.group(2)
-            if not csv:  # unknown symbol — Sina returns empty
-                continue
-            fields = csv.split(",")
-            if len(fields) < 4:
-                continue
-            name = fields[0]
-            try:
-                prev_close = float(fields[1])
-                current = float(fields[3])
-            except (ValueError, IndexError):
-                continue
-            if prev_close <= 0:
-                chg_pct = None
-            else:
-                chg_pct = (current - prev_close) / prev_close * 100
-            quote_by_sina_code[sina_code] = {
-                "name": name,
-                "current": current,
-                "prev_close": prev_close,
-                "chg_pct": chg_pct,
-            }
-
-        if not quote_by_sina_code:
-            return "<飙升榜 暂不可用：Sina 行情返回为空>"
-
-        # Step 3: merge rank_data + quote_by_sina_code into a single DataFrame
-        # rank_data: sc, rk, hrc (and we use sc as the key)
-        # quote_by_sina_code: keyed by sina code (sh600519), fields: name, current, chg_pct
-        rows_out = []
-        for item in rank_data:
-            sc = item.get("sc", "")
-            if not isinstance(sc, str) or len(sc) < 8:
-                continue
-            sina_code = sc_to_sina.get(sc)
-            quote = quote_by_sina_code.get(sina_code, {}) if sina_code else {}
-            rows_out.append({
-                "代码": sc,
-                "股票名称": quote.get("name", ""),
-                "最新价": quote.get("current"),
-                "涨跌幅": quote.get("chg_pct"),
-                "当前排名": item.get("rk"),
-                "排名较昨日变动": item.get("hrc"),
-            })
-
-        # Sort by 排名较昨日变动 desc, take top 20
-        df = pd.DataFrame(rows_out)
-        df["排名较昨日变动"] = pd.to_numeric(df["排名较昨日变动"], errors="coerce")
-        df["当前排名"] = pd.to_numeric(df["当前排名"], errors="coerce")
-        df["涨跌幅"] = pd.to_numeric(df["涨跌幅"], errors="coerce")
-        df = df.dropna(subset=["排名较昨日变动"]).sort_values("排名较昨日变动", ascending=False).head(20)
-
-        if df.empty:
-            return "<飙升榜 暂不可用： no rows after merge>"
-
-        from datetime import datetime as _dt
-        header = (
-            "🚀 东方财富 关注度飙升榜 — Top 20（按昨日排名变动降序）"
-        )
-        rows = []
-        for _, r in df.iterrows():
-            chg = r["涨跌幅"]
-            chg_str = f"{chg:+.2f}%" if pd.notna(chg) else "—"
-            rank_now = r["当前排名"]
-            rank_now_str = f"{int(rank_now)}" if pd.notna(rank_now) else "—"
-            rank_chg = r["排名较昨日变动"]
-            rank_chg_str = f"{int(rank_chg)}"
-            rows.append(
-                f"🔥 {r['代码']} {r['股票名称']} · 排名 #{rank_now_str} (飙升 +{rank_chg_str} 位) · {chg_str}"
-            )
-        return (
-            header + "\n" + "\n".join(rows) + "\n\n"
-            "📋 解读：以上股票今日突然成为散户关注焦点。结合涨跌幅方向："
-            "涨停或大涨 = 主升浪起势；急跌 = 利空集中爆发。"
-            "与同板块涨停板或龙虎榜横向比对，可判断是否板块主升浪正在形成。"
-        )
+        err, data = _hot_up_rank_fetch_raw()
     except Exception as e:
         logger.warning("飙升榜 fetch failed: %s", e)
         return f"<飙升榜 暂不可用： {type(e).__name__}: {str(e)[:120]}>"
+
+    if err is not None:
+        return err
+
+    header = "🚀 东方财富 关注度飙升榜 — Top 20（按昨日排名变动降序）"
+    rows = []
+    for d in data:
+        chg = d.get("chg_pct")
+        chg_str = f"{chg:+.2f}%" if chg is not None else "—"
+        rank_now = d.get("rank")
+        rank_now_str = f"{rank_now}" if rank_now is not None else "—"
+        rows.append(
+            f"🔥 {d['code_prefixed']} {d['name']} · 排名 #{rank_now_str} (飙升 +{d['hrc']} 位) · {chg_str}"
+        )
+    return (
+        header + "\n" + "\n".join(rows) + "\n\n"
+        "📋 解读：以上股票今日突然成为散户关注焦点。结合涨跌幅方向："
+        "涨停或大涨 = 主升浪起势；急跌 = 利空集中爆发。"
+        "与同板块涨停板或龙虎榜横向比对，可判断是否板块主升浪正在形成。"
+    )
 
 
 # ---------------------------------------------------------------------------

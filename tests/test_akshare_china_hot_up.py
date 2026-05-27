@@ -437,3 +437,67 @@ def test_hot_up_does_not_retry_on_value_error():
     # ValueError is not retried — only one call
     assert fake_session.post.call_count == 1
     mock_sleep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# New: fetch_hot_up_rank_data returns structured Top 20
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_fetch_hot_up_rank_data_returns_structured_top20():
+    """fetch_hot_up_rank_data returns list[dict] with required keys, up to 20 entries."""
+    rank_data = _make_rank_data(25)  # 25 items — should be truncated to 20
+    rank_response = {"data": rank_data}
+    em_sess = _make_eastmoney_session(rank_response)
+    sina_sess = _make_sina_session(_fake_sina_response(rank_data))
+
+    with patch.object(ac, "_eastmoney_session", return_value=em_sess), \
+         patch.object(ac, "_sina_session", return_value=sina_sess):
+        result = ac.fetch_hot_up_rank_data()
+
+    assert isinstance(result, list)
+    assert len(result) == 20, f"Expected 20 entries (truncated from 25), got {len(result)}"
+
+    required_keys = {"code_prefixed", "code_bare", "name", "rank", "hrc", "chg_pct"}
+    for item in result:
+        missing = required_keys - set(item.keys())
+        assert not missing, f"Missing keys {missing} in item: {item}"
+        # code_prefixed must be like "SH600000"
+        assert isinstance(item["code_prefixed"], str) and len(item["code_prefixed"]) >= 8
+        # code_bare must be bare 6-digit
+        assert isinstance(item["code_bare"], str) and len(item["code_bare"]) == 6 and item["code_bare"].isdigit()
+        # hrc must be int
+        assert isinstance(item["hrc"], int)
+        # chg_pct must be float or None
+        assert item["chg_pct"] is None or isinstance(item["chg_pct"], float)
+
+
+@pytest.mark.unit
+def test_fetch_hot_up_rank_data_returns_empty_on_failure():
+    """fetch_hot_up_rank_data returns [] when endpoint fails — never raises."""
+    fake_session = MagicMock()
+    fake_session.post.side_effect = RuntimeError("network error")
+
+    with patch.object(ac, "_eastmoney_session", return_value=fake_session):
+        result = ac.fetch_hot_up_rank_data()
+
+    assert result == []
+
+
+@pytest.mark.unit
+def test_fetch_hot_up_rank_data_sorted_by_hrc_desc():
+    """fetch_hot_up_rank_data is sorted by hrc descending."""
+    hrc_values = [10, 200, 50, 150, 5]
+    rank_data = _make_rank_data(5, hrc_values=hrc_values)
+    rank_response = {"data": rank_data}
+    em_sess = _make_eastmoney_session(rank_response)
+    sina_sess = _make_sina_session(_fake_sina_response(rank_data))
+
+    with patch.object(ac, "_eastmoney_session", return_value=em_sess), \
+         patch.object(ac, "_sina_session", return_value=sina_sess):
+        result = ac.fetch_hot_up_rank_data()
+
+    assert len(result) == 5
+    hrcs = [item["hrc"] for item in result]
+    assert hrcs == sorted(hrcs, reverse=True), f"Expected desc order, got: {hrcs}"
+    assert hrcs[0] == 200
