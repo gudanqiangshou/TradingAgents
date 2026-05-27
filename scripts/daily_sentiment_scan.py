@@ -146,7 +146,7 @@ def section_c_xueqiu_surge_top15() -> str:
 
         col_sym_hot = next((c for c in df_hot.columns if "代码" in c), None)
         col_sym_weekly = next((c for c in df_weekly.columns if "代码" in c), None)
-        col_name = next((c for c in df_weekly.columns if "名称" in c), None)
+        col_name = next((c for c in df_weekly.columns if "名称" in c or "简称" in c), None)
         col_follow = next((c for c in df_weekly.columns if "关注" in c), None)
         if not col_sym_hot or not col_sym_weekly:
             return "📈 雪球飙升榜\n(unavailable: 代码 column not found)"
