@@ -20,6 +20,16 @@ RATINGS_5_TIER: Tuple[str, ...] = (
     "Buy", "Overweight", "Hold", "Underweight", "Sell",
 )
 
+# 3-tier collapse for downstream consumers needing BUY/HOLD/SELL semantics.
+# Lives next to the 5-tier vocabulary so the two stay in lockstep.
+SIGNAL_ACTION_MAP = {
+    "Buy": "BUY",
+    "Overweight": "BUY",
+    "Hold": "HOLD",
+    "Underweight": "SELL",
+    "Sell": "SELL",
+}
+
 _RATING_SET = {r.lower() for r in RATINGS_5_TIER}
 
 # Matches "Rating: X" / "rating - X" / "Rating: **X**" — tolerates markdown
