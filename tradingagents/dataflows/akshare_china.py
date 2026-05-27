@@ -1418,6 +1418,25 @@ def _eastmoney_session():
     return s
 
 
+def _sina_session():
+    """A requests.Session configured for Sina realtime quote endpoint
+    (hq.sinajs.cn). trust_env=False to bypass system proxy. Requires
+    Referer: https://finance.sina.com.cn or Sina may return 403."""
+    import requests
+    s = requests.Session()
+    s.trust_env = False
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+        "Referer": "https://finance.sina.com.cn",
+    })
+    return s
+
+
 def _eastmoney_http_retry(call_fn, max_attempts=3, backoffs=(0.5, 1.5, 3.0)):
     """Light retry wrapper for eastmoney HTTP calls. Retries on ConnectionError
     / Timeout (eastmoney burst-rate-limits with TCP resets, not HTTP codes).
@@ -1574,56 +1593,88 @@ def get_hot_up_rank() -> str:
             return "<飙升榜 暂不可用： empty rank list from eastmoney>"
         # rank_data items have keys: sc (e.g. "SH600519"), rk (current rank), hrc (rank change vs yesterday)
 
-        # Step 2: GET full-market A-share spot via clist endpoint
-        # (ulist.np is blocked from overseas IPs; clist on same subdomain works and
-        # returns the same f12/f14/f2/f3 schema)
-        spot_url = "https://push2.eastmoney.com/api/qt/clist/get"
-        spot_params = {
-            "pn": "1",
-            "pz": "10000",  # large enough to cover all A-share (~5400 rows)
-            "po": "1",
-            "np": "1",
-            "fltt": "2",
-            "invt": "2",
-            "fid": "f3",  # sort by 涨跌幅 (irrelevant, just need data)
-            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",  # 深主板+创业板+沪主板+科创板+北交所
-            "fields": "f12,f14,f2,f3",  # 代码 / 名称 / 最新价 / 涨跌幅
-        }
-        price_resp = _eastmoney_http_retry(
-            lambda: sess.get(spot_url, params=spot_params, timeout=10)
-        )
-        if price_resp.status_code != 200:
-            return f"<飙升榜 暂不可用：spot endpoint HTTP {price_resp.status_code}>"
-        price_json = price_resp.json()
-        price_diff = (
-            (price_json.get("data") or {}).get("diff", [])
-            if isinstance(price_json, dict) else []
-        )
-        if not isinstance(price_diff, list) or not price_diff:
-            return "<飙升榜 暂不可用：spot 列表为空>"
+        # Step 2: GET realtime quote via Sina (push2.eastmoney.com is server-blocked
+        # for overseas IPs across all paths). Sina returns CSV in a GB18030-encoded
+        # JS variable per ticker.
+        sina_sess = _sina_session()
 
-        # Build code → spot row dict for fast lookup
-        price_by_code = {
-            row.get("f12"): row
-            for row in price_diff
-            if isinstance(row, dict) and row.get("f12")
-        }
+        # Convert step-1 sc codes (SH605300/SZ000725/BJ430047) to sina lowercase prefix.
+        sina_codes = []
+        sc_to_sina = {}  # for later lookup: SH605300 → sh605300
+        for item in rank_data:
+            sc = item.get("sc", "")
+            if not (isinstance(sc, str) and len(sc) >= 8):
+                continue
+            prefix = sc[:2].lower()  # sh / sz / bj
+            code_only = sc[2:]
+            sina_code = f"{prefix}{code_only}"
+            sina_codes.append(sina_code)
+            sc_to_sina[sc] = sina_code
 
-        # Step 3: merge rank_data + price_by_code into a single DataFrame
+        if not sina_codes:
+            return "<飙升榜 暂不可用：no valid sc codes>"
+
+        sina_url = "https://hq.sinajs.cn/list=" + ",".join(sina_codes)
+        quote_resp = _eastmoney_http_retry(
+            lambda: sina_sess.get(sina_url, timeout=10)
+        )
+        if quote_resp.status_code != 200:
+            return f"<飙升榜 暂不可用：Sina 行情 HTTP {quote_resp.status_code}>"
+
+        try:
+            body_text = quote_resp.content.decode("gb18030", errors="replace")
+        except Exception:
+            body_text = quote_resp.text
+
+        # Parse: each line is `var hq_str_<symbol>="<csv>";`
+        import re as _re
+        quote_by_sina_code = {}
+        for line in body_text.splitlines():
+            m = _re.match(r'var\s+hq_str_(\w+)="([^"]*)";', line)
+            if not m:
+                continue
+            sina_code = m.group(1)
+            csv = m.group(2)
+            if not csv:  # unknown symbol — Sina returns empty
+                continue
+            fields = csv.split(",")
+            if len(fields) < 4:
+                continue
+            name = fields[0]
+            try:
+                prev_close = float(fields[1])
+                current = float(fields[3])
+            except (ValueError, IndexError):
+                continue
+            if prev_close <= 0:
+                chg_pct = None
+            else:
+                chg_pct = (current - prev_close) / prev_close * 100
+            quote_by_sina_code[sina_code] = {
+                "name": name,
+                "current": current,
+                "prev_close": prev_close,
+                "chg_pct": chg_pct,
+            }
+
+        if not quote_by_sina_code:
+            return "<飙升榜 暂不可用：Sina 行情返回为空>"
+
+        # Step 3: merge rank_data + quote_by_sina_code into a single DataFrame
         # rank_data: sc, rk, hrc (and we use sc as the key)
-        # price_by_code: f12=代码, f14=股票名称, f2=最新价, f3=涨跌幅
+        # quote_by_sina_code: keyed by sina code (sh600519), fields: name, current, chg_pct
         rows_out = []
         for item in rank_data:
             sc = item.get("sc", "")
             if not isinstance(sc, str) or len(sc) < 8:
                 continue
-            code_only = sc[2:]  # strip "SH"/"SZ" prefix
-            price_row = price_by_code.get(code_only, {})
+            sina_code = sc_to_sina.get(sc)
+            quote = quote_by_sina_code.get(sina_code, {}) if sina_code else {}
             rows_out.append({
                 "代码": sc,
-                "股票名称": price_row.get("f14", ""),
-                "最新价": price_row.get("f2"),
-                "涨跌幅": price_row.get("f3"),
+                "股票名称": quote.get("name", ""),
+                "最新价": quote.get("current"),
+                "涨跌幅": quote.get("chg_pct"),
                 "当前排名": item.get("rk"),
                 "排名较昨日变动": item.get("hrc"),
             })
