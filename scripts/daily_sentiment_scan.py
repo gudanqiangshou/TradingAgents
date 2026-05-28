@@ -843,30 +843,44 @@ def _cmd_push(date: str, input_path: str, no_feishu: bool) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Daily retail-attention scan: A股 飙升榜/龙虎榜/雪球 + 美股 StockTwits Trending"
+        description="Daily retail-attention scan + per-ticker TradingAgents analysis"
     )
-    parser.add_argument(
-        "--date",
-        default=datetime.now().strftime("%Y-%m-%d"),
-        help="Reference date in YYYY-MM-DD format (default: today)",
-    )
-    parser.add_argument(
-        "--no-feishu",
-        action="store_true",
-        help="Skip 飞书 webhook push even if TRADINGAGENTS_FEISHU_WEBHOOK is set",
-    )
-    parser.add_argument(
-        "--feishu-only",
-        action="store_true",
-        help="Skip stdout output, only push to 飞书 webhook",
-    )
+    parser.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
+
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--analyze", action="store_true",
+                      help="Scan + analyze + atomic write JSON. Does NOT push to 飞书.")
+    mode.add_argument("--push", action="store_true",
+                      help="Read JSON snapshot + push 飞书 post. Does NOT scan or analyze.")
+
+    parser.add_argument("--output", default=None,
+                        help="(--analyze) JSON output path. Default: ~/.tradingagents/sentiment-scan/<DATE>.json")
+    parser.add_argument("--input", default=None,
+                        help="(--push) JSON input path. Default: same as --output default.")
+    parser.add_argument("--no-feishu", action="store_true",
+                        help="Skip 飞书 webhook push.")
+    parser.add_argument("--feishu-only", action="store_true",
+                        help="(default mode only) Skip stdout, push only.")
     args = parser.parse_args()
 
-    report_md = build_report(args.date)
+    # Reject incompatible flag combinations.
+    if args.analyze and (args.no_feishu or args.feishu_only):
+        parser.error("--analyze does not push to 飞书; --no-feishu/--feishu-only are not allowed with it")
+    if args.push and args.feishu_only:
+        parser.error("--push has no stdout output; --feishu-only is redundant")
 
+    if args.analyze:
+        output_path = args.output or _default_snapshot_path(args.date)
+        sys.exit(_cmd_analyze(date=args.date, output_path=output_path))
+
+    if args.push:
+        input_path = args.input or _default_snapshot_path(args.date)
+        sys.exit(_cmd_push(date=args.date, input_path=input_path, no_feishu=args.no_feishu))
+
+    # Default (no subcommand): unchanged legacy path.
+    report_md = build_report(args.date)
     if not args.feishu_only:
         print(report_md)
-
     webhook = os.environ.get("TRADINGAGENTS_FEISHU_WEBHOOK")
     if webhook and not args.no_feishu:
         try:
@@ -879,10 +893,7 @@ def main():
             except Exception:
                 pass
             if r.status_code != 200 or resp_json.get("code") != 0:
-                print(
-                    f"[warning] 飞书 webhook returned {r.status_code}: {r.text[:200]}",
-                    file=sys.stderr,
-                )
+                print(f"[warning] 飞书 webhook returned {r.status_code}: {r.text[:200]}", file=sys.stderr)
         except Exception as exc:
             print(f"[warning] 飞书 push failed: {exc}", file=sys.stderr)
 

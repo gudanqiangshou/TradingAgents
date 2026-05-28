@@ -128,3 +128,38 @@ def test_push_with_missing_snapshot_sends_degraded_alert(tmp_path, monkeypatch):
     payload = mock_post.call_args.kwargs["json"]
     text_blob = json.dumps(payload, ensure_ascii=False)
     assert "未拿到分析快照" in text_blob or "snapshot" in text_blob.lower()
+
+
+def test_no_flags_default_path_unchanged(tmp_path, monkeypatch, capsys):
+    """No --analyze and no --push → existing behavior: print + push directly."""
+    from scripts import daily_sentiment_scan as mod
+    # Mock build_report + everything that touches the network/disk.
+    monkeypatch.setattr(mod, "build_report", lambda d: "REPORT_PLACEHOLDER")
+    monkeypatch.setattr(mod, "convert_to_feishu_post", lambda md, d: {"msg_type": "post"})
+    monkeypatch.delenv("TRADINGAGENTS_FEISHU_WEBHOOK", raising=False)
+    # main() reads sys.argv — set it minimally.
+    monkeypatch.setattr(mod.sys, "argv", ["daily_sentiment_scan.py", "--date", "2026-05-27"])
+    mod.main()
+    out = capsys.readouterr().out
+    assert "REPORT_PLACEHOLDER" in out  # current default writes to stdout
+
+
+def test_analyze_and_push_are_mutually_exclusive(monkeypatch):
+    from scripts import daily_sentiment_scan as mod
+    monkeypatch.setattr(mod.sys, "argv", ["s.py", "--analyze", "--push"])
+    with pytest.raises(SystemExit):
+        mod.main()
+
+
+def test_push_with_feishu_only_rejected(monkeypatch):
+    from scripts import daily_sentiment_scan as mod
+    monkeypatch.setattr(mod.sys, "argv", ["s.py", "--push", "--feishu-only"])
+    with pytest.raises(SystemExit):
+        mod.main()
+
+
+def test_analyze_with_no_feishu_rejected(monkeypatch):
+    from scripts import daily_sentiment_scan as mod
+    monkeypatch.setattr(mod.sys, "argv", ["s.py", "--analyze", "--no-feishu"])
+    with pytest.raises(SystemExit):
+        mod.main()
