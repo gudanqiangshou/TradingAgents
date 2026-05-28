@@ -18,10 +18,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import pandas as pd
 import yfinance as yf
 
+from tradingagents.dataflows import _dep_bootstrap
+from tradingagents.dataflows.akshare_china import (
+    _eastmoney_http_retry,
+    _eastmoney_session,
+)
 from tradingagents.dataflows.stockstats_utils import yf_retry
 from tradingagents.market_resolver import Market, resolve_market
+
+_EASTMONEY_QUOTE_URL = "http://push2.eastmoney.com/api/qt/stock/get"
+_EASTMONEY_UT = "fa5fd1943c7b386f172d6893dbfba10b"  # eastmoney public ut token
+_EASTMONEY_FIELDS = "f43,f57,f58,f116,f117,f162,f163,f167"
 
 _EMPTY_FIELDS = {
     "pe_ttm": None,
@@ -77,6 +87,89 @@ def _fetch_us(ticker: str) -> dict:
     }
 
 
+def _a_share_secid(code: str) -> str:
+    """A 股 eastmoney secid prefix.
+
+    SH (上交所) = 1: code starts with 60 / 68 / 90
+    SZ (深交所) = 0: code starts with 00 / 30 / 20
+    BJ (北交所) = 0: code starts with 4 / 8
+    """
+    if code.startswith(("60", "68", "90")):
+        return f"1.{code}"
+    return f"0.{code}"   # 涵盖 SZ + BJ
+
+
+def _eastmoney_quote(secid: str) -> dict:
+    """Fetch eastmoney quote dict (bypass akshare wrapper, hit push2 directly)."""
+    session = _eastmoney_session()
+    params = {"secid": secid, "fields": _EASTMONEY_FIELDS, "ut": _EASTMONEY_UT}
+    r = _eastmoney_http_retry(
+        lambda: session.get(_EASTMONEY_QUOTE_URL, params=params, timeout=10)
+    )
+    payload = r.json()
+    return payload.get("data") or {}
+
+
+def _a_share_roe(code: str) -> float | None:
+    """Extract A-share ROE from akshare.stock_financial_abstract.
+
+    Strategy: EXACT-MATCH row 指标 == "净资产收益率(ROE)" (NOT substring;
+    avoid colliding with "摊薄净资产收益率" / "净资产收益率_平均_扣除非经常损益"
+    / "净资产收益率_平均" / "摊薄净资产收益率_扣除非经常损益").
+    Take the value from the latest 8-digit-period column.
+    """
+    ak = _dep_bootstrap.ensure("akshare")
+    df = ak.stock_financial_abstract(symbol=code)
+    if not isinstance(df, pd.DataFrame) or df.empty or "指标" not in df.columns:
+        return None
+    period_cols = [c for c in df.columns if str(c).isdigit() and len(str(c)) == 8]
+    if not period_cols:
+        return None
+    latest = max(period_cols)
+    for _, row in df.iterrows():
+        if str(row["指标"]).strip() == "净资产收益率(ROE)":
+            val = row[latest]
+            if pd.isna(val):
+                continue
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _fetch_a_share(ticker: str) -> dict:
+    code = ticker.strip().upper().split(".")[0]
+    secid = _a_share_secid(code)
+
+    quote = _eastmoney_quote(secid)
+    f163 = quote.get("f163")
+    pe_ttm = f163 / 100.0 if f163 and f163 > 0 else None   # ×100 编码; 0 视为 None
+    market_cap = quote.get("f116") or None
+
+    roe = _a_share_roe(code)
+
+    values: dict[str, float | None] = {
+        "pe_ttm": pe_ttm,
+        "pe_forward": None,    # akshare 不暴露 forward consensus
+        "fcf": None,           # aggregate FCF 在公开端点不可得
+        "roe": roe,
+        "market_cap": market_cap,
+    }
+    missing, status = _fields_status(values)
+    return {
+        "ticker": code,
+        "market": "A_SHARE",
+        **values,
+        "currency": "CNY",
+        "as_of": datetime.now().strftime("%Y-%m-%d"),
+        "source": "akshare+eastmoney",
+        "missing_fields": missing,
+        "status": status,
+        "error": None,
+    }
+
+
 def fetch_structured_fundamentals(ticker: str) -> dict:
     """Public entry — never throws. status=error on any vendor failure.
 
@@ -99,7 +192,9 @@ def fetch_structured_fundamentals(ticker: str) -> dict:
         market_name = m.name  # "US" / "A_SHARE" / "HK" / "CRYPTO"
         if m == Market.US:
             return _fetch_us(ticker)
-        # A_SHARE + HK branches added in subsequent tasks
+        if m == Market.A_SHARE:
+            return _fetch_a_share(ticker)
+        # HK branch added in subsequent task
         return _error_result(ticker, market_name, f"market {market_name} not yet supported")
     except Exception as exc:
         return _error_result(ticker, market_name, f"{type(exc).__name__}: {str(exc)[:200]}")
