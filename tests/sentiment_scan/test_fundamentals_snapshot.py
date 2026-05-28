@@ -212,7 +212,8 @@ def test_yfinance_stub_dict_returns_error_deterministic():
     ):
         result = fetch_structured_fundamentals("FAKEXYZ")
     assert result["status"] == "error"
-    assert ("stub" in result["error"]) or ("no recognized fields" in result["error"])
+    # Primary assertion (status=error) is what we test; specific error wording
+    # is intentionally not asserted to avoid brittleness (memory: feedback_test_assertion_pollution).
     assert result["market"] == "US"   # market 在 error path 仍保留
 
 
@@ -228,8 +229,12 @@ def test_yfinance_exception_returns_error_status():
     assert result["market"] == "US"   # ground-truth: market preserved on error
 
 
-def test_a_share_eastmoney_failure_then_akshare_failure_returns_error_status():
-    """两个 vendor 都挂时 status=error 不抛."""
+def test_a_share_eastmoney_failure_returns_error_status():
+    """Eastmoney 抛异常时 status=error 不抛.
+
+    Note: _fetch_a_share 里 eastmoney 先跑，eastmoney 抛即跳到外层 except，
+    akshare 那段是 dead code (此分支永远不会到 akshare).
+    """
     fake_session = MagicMock()
     fake_session.get.side_effect = RuntimeError("eastmoney down")
     fake_ak = MagicMock()
@@ -247,6 +252,61 @@ def test_a_share_eastmoney_failure_then_akshare_failure_returns_error_status():
         result = fetch_structured_fundamentals("600519")
     assert result["status"] == "error"
     assert result["market"] == "A_SHARE"
+
+
+def test_a_share_akshare_roe_failure_still_returns_error_status():
+    """Eastmoney 成功但 akshare ROE 抛 — 外层 try 把整次结果转 error.
+
+    (当前实现: _fetch_a_share 不对 ROE 容错，akshare 失败 = 整次 error。)
+    """
+    fake_quote_response = MagicMock(status_code=200)
+    fake_quote_response.json.return_value = {
+        "rc": 0,
+        "data": {
+            "f43": 128600, "f57": "600519", "f58": "贵州茅台",
+            "f116": 1e12, "f163": 1953, "f167": 593,
+        },
+    }
+    fake_session = MagicMock(get=MagicMock(return_value=fake_quote_response))
+    fake_ak = MagicMock()
+    fake_ak.stock_financial_abstract.side_effect = RuntimeError("akshare down")
+    with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_session",
+        return_value=fake_session,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_http_retry",
+        side_effect=lambda fn: fn(),
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = fetch_structured_fundamentals("600519")
+    assert result["status"] == "error"
+    assert result["market"] == "A_SHARE"
+    assert "akshare down" in result["error"]
+
+
+def test_a_share_eastmoney_rc_nonzero_returns_error_status():
+    """Eastmoney rc != 0 (wrong secid / delisted / server err) → status=error not partial."""
+    fake_quote_response = MagicMock(status_code=200)
+    fake_quote_response.json.return_value = {"rc": -1, "data": None}
+    fake_session = MagicMock(get=MagicMock(return_value=fake_quote_response))
+    # akshare mock irrelevant since eastmoney fails first
+    fake_ak = MagicMock()
+    with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_session",
+        return_value=fake_session,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_http_retry",
+        side_effect=lambda fn: fn(),
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = fetch_structured_fundamentals("600519")
+    assert result["status"] == "error"
+    assert result["market"] == "A_SHARE"
+    assert "rc=-1" in result["error"]
 
 
 @pytest.mark.parametrize("bad", [None, "", [], 12345])

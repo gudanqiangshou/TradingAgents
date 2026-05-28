@@ -100,14 +100,23 @@ def _a_share_secid(code: str) -> str:
 
 
 def _eastmoney_quote(secid: str) -> dict:
-    """Fetch eastmoney quote dict (bypass akshare wrapper, hit push2 directly)."""
+    """Fetch eastmoney quote dict (bypass akshare wrapper, hit push2 directly).
+
+    Raises ValueError if vendor returns rc != 0 or no data (wrong secid /
+    delisted / server err) — avoid silently degrading to partial-with-Nones.
+    """
     session = _eastmoney_session()
     params = {"secid": secid, "fields": _EASTMONEY_FIELDS, "ut": _EASTMONEY_UT}
     r = _eastmoney_http_retry(
         lambda: session.get(_EASTMONEY_QUOTE_URL, params=params, timeout=10)
     )
     payload = r.json()
-    return payload.get("data") or {}
+    if payload.get("rc") != 0:
+        raise ValueError(f"eastmoney returned rc={payload.get('rc')} for secid={secid}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError(f"eastmoney returned no data for secid={secid}")
+    return data
 
 
 def _a_share_roe(code: str) -> float | None:
