@@ -10,15 +10,16 @@ Order:
   7. 📋 决策口诀 (static)
 
 A 股 ticker codes get xueqiu.com links; StockTwits-section US tickers get
-stocktwits.com links — reuse `_parse_line_to_feishu_elements` from
-scripts/daily_sentiment_scan.py.
+stocktwits.com links — reuse `_parse_line_to_feishu_elements` from the
+neutral `feishu_elements` module to avoid circular imports.
 """
 from __future__ import annotations
 
 from typing import Any
 
-# Reuse the link-rich element parser from the existing script.
-from scripts.daily_sentiment_scan import _parse_line_to_feishu_elements
+# Reuse the link-rich element parser from the neutral shared module
+# (breaks the circular import with scripts/daily_sentiment_scan.py).
+from tradingagents.sentiment_scan.feishu_elements import _parse_line_to_feishu_elements
 
 _MANTRA_BULLETS = [
     "• A 股飙升榜 ∩ 龙虎榜 = 散户 + 机构同向 = 最强信号",
