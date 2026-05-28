@@ -159,12 +159,42 @@ tradingagents/sentiment_scan/               # 新包
 
 `fetch_structured_fundamentals(ticker: str) -> dict`
 
-按市场分发：
-- **US**: `yf.Ticker(t).info` via `yf_retry` (复用 vendor helper) — `trailingPE`→pe_ttm / `forwardPE`→pe_forward / `freeCashflow`→fcf / `returnOnEquity`→roe / `marketCap`→market_cap / `currency`→currency
-- **A_SHARE**: `akshare.stock_financial_abstract(symbol=code)` — 中文行名匹配："市盈率"→pe_ttm；"净资产收益率(ROE)"→roe；"自由现金流"（若存在）→fcf；"总市值"→market_cap。pe_forward 通常 None（akshare 不暴露 forward consensus）。
-- **HK**: `akshare.stock_financial_hk_analysis_indicator_em(symbol=code)` — 列名匹配 (PE_TTM / ROE_AVG / 等)。pe_forward 通常 None。
+按市场分发。**实测确认（2026-05-28 实测真实 akshare + 东财 API）**：
 
-**永不抛**。任何 vendor 失败 → `status="error"`, `error=msg`, 所有字段 None。部分字段 None → `status="partial"`, `missing_fields=[...]`。
+- **US**: `yf.Ticker(t).info` via `yf_retry` — `trailingPE`→pe_ttm / `forwardPE`→pe_forward / `freeCashflow`→fcf / `returnOnEquity`→roe / `marketCap`→market_cap / `currency`→currency。需 sentinel-key 检查（yfinance 对无效 ticker 返 `{"trailingPegRatio": None}` 真值 stub，必须至少含 `trailingPE/forwardPE/freeCashflow/returnOnEquity/marketCap/longName/shortName/regularMarketPrice` 之一才算有效，否则 raise → status=error）。
+
+- **A_SHARE + HK PE/PB/总市值**: 走**东财 quote API**（绕过 akshare 包装函数，akshare 自带函数走代理拦截子域）。
+  - 复用 `tradingagents/dataflows/akshare_china.py:1399` 的 `_eastmoney_session()` (trust_env=False + Chrome headers) + `_eastmoney_http_retry()` (3 retry, [0.5,1.5,3.0]s backoff)
+  - Endpoint: `http://push2.eastmoney.com/api/qt/stock/get`
+  - Params:
+    - `secid`: A股 `1.{code}` for SH (60/68/90 前缀), `0.{code}` for SZ (00/30/20 前缀), `0.{code}` for BJ (4/8 前缀, 实测 BJ 也用 0)；HK `116.{code.zfill(5)}`
+    - `fields`: `f43,f57,f58,f116,f117,f162,f163,f167`
+    - `ut`: `fa5fd1943c7b386f172d6893dbfba10b` (东财公开 ut token)
+  - 响应字段（注意 ×100 整数编码）：
+    - `f43` ÷100 → 最新价（CNY/HKD）
+    - `f57` → 代码; `f58` → 名称
+    - `f116` (原值，元/HKD) → 总市值
+    - `f117` (原值) → 流通市值
+    - `f162` ÷100 → 市盈率(动)
+    - `f163` ÷100 → **PE TTM** (我们用这个)
+    - `f167` ÷100 → PB
+  - 实测验证：600519 茅台 PE TTM=19.53, 总市值=1.6 万亿；00700 腾讯 PE TTM=17.11, 总市值=3.85 万亿 HKD。
+  - **None 编码**：东财对无 PE 的（如 ST 股 / 停牌）返回 `f163: 0`，**0 不可信** —— 应判 `value > 0` 才接受为 PE。
+
+- **A_SHARE ROE**: 走 `akshare.stock_financial_abstract(symbol=code)` — 6 个 ROE 候选行中**选第一行 "净资产收益率(ROE)"** 精确字符串匹配（避免子串误中"摊薄净资产收益率"/"净资产收益率_平均_扣除非经常损益"等 5 个变体）。该值已是 ratio 形式（0.31 表示 31%）。
+
+- **HK ROE**: 走 `akshare.stock_financial_hk_analysis_indicator_em(symbol=code)` — 列名 `ROE_AVG`。**该值单位是百分点 (21.13)，必须 ÷100 转 ratio (0.2113)** 才与 yfinance/A股的 returnOnEquity ratio 形式一致。
+
+- **A_SHARE + HK FCF**: **不取**（aggregate FCF 在公开 akshare 端点不可得，`stock_financial_abstract` 只有 `每股企业自由现金流量` per-share，单位错；从 cashflow_statement 端点算 经营现金流-资本开支 太复杂 + 不稳）。返回 `fcf=None`，`missing_fields` 包含 `"fcf"`。
+
+- **A_SHARE + HK pe_forward**: vendors 不暴露 forward consensus。`pe_forward=None`，`missing_fields` 包含 `"pe_forward"`。
+
+**永不抛**。任何 vendor / HTTP 失败 → `status="error"`, `error=msg`, 所有字段 None。部分字段 None → `status="partial"`, `missing_fields=[...]`。
+
+预期 `status` 分布：
+- US：通常 `ok`（yfinance 完整字段）
+- A_SHARE：通常 `partial`（fcf + pe_forward None；其余完整）
+- HK：通常 `partial`（fcf + pe_forward None；其余完整）
 
 ### `analysis_runner.py`
 

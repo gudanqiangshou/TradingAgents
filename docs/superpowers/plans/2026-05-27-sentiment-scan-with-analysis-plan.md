@@ -256,6 +256,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ## Phase 2 — `fundamentals_snapshot.py`: vendor-direct PE/远期PE/FCF/ROE抽取
 
+**⚠ Plan rewritten 2026-05-28 after Phase 2 v1 code-quality reviewer caught plan ground-truth errors:** 原 plan v1 假设 `stock_financial_abstract` 含「市盈率/总市值」行 + `stock_financial_hk_analysis_indicator_em` 含 `PE_TTM`/`MARKET_CAP` 列——**实测都不存在**。新版改用**东财 quote API 底层 HTTP**（绕过 akshare 函数走 push2.eastmoney.com 被代理拦的子域），复用已有 `tradingagents/dataflows/akshare_china.py:1399` 的 `_eastmoney_session()` + `_eastmoney_http_retry()` helper。实测验证：600519 茅台 PE TTM=19.53 / 总市值=1.6 万亿元；00700 腾讯 PE TTM=17.11 / 总市值=3.85 万亿 HKD。详见 spec section "fundamentals_snapshot.py"。
+
 ### Task 2.1: Write failing test for US ticker happy path
 
 **Files:**
@@ -287,9 +289,7 @@ def test_us_ticker_returns_full_fields(monkeypatch):
     fake_ticker = MagicMock()
     fake_ticker.info = fake_info
 
-    # The function imports yf at module level; patch the Ticker constructor.
     with patch("tradingagents.sentiment_scan.fundamentals_snapshot.yf.Ticker", return_value=fake_ticker):
-        # yf_retry just invokes the lambda — patch it to identity for the test
         with patch("tradingagents.sentiment_scan.fundamentals_snapshot.yf_retry", side_effect=lambda fn: fn()):
             result = fetch_structured_fundamentals("AAPL")
 
@@ -314,12 +314,14 @@ def test_us_ticker_returns_full_fields(monkeypatch):
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'tradingagents.sentiment_scan.fundamentals_snapshot'`.
 
-### Task 2.2: Implement US branch skeleton
+### Task 2.2: Implement US branch with sentinel-key guard
 
 **Files:**
 - Create: `tradingagents/sentiment_scan/fundamentals_snapshot.py`
 
-- [ ] **Step 1: Implement minimal US branch**
+**Key design point**: yfinance returns `{"trailingPegRatio": None}` truthy stub dict for unknown tickers (NOT empty, NOT raise). To honor the spec's never-throws + bad-input → status=error contract, require at least one of `trailingPE/forwardPE/freeCashflow/returnOnEquity/marketCap/longName/shortName/regularMarketPrice` keys to be present. If none → raise → outer try catches → status=error. Without this guard, `_fetch_us("INVALID...")` would return `status="partial"` with all None values — violating spec.
+
+- [ ] **Step 1: Implement**
 
 ```python
 """Vendor-direct structured fundamentals extraction.
@@ -327,6 +329,15 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradingagents.sentime
 Returns plain dicts (not vendor strings) so JSON snapshot writers can
 serialize without parsing free-form LLM-facing text. Never throws —
 any vendor failure becomes status="error".
+
+Schema notes (real-vendor verified 2026-05-28):
+- US: yfinance .info dict
+- A_SHARE PE+市值: eastmoney quote API (push2.eastmoney.com/api/qt/stock/get)
+- A_SHARE ROE: akshare.stock_financial_abstract row "净资产收益率(ROE)"
+- HK PE+市值: same eastmoney quote API (secid=116.{zfill5})
+- HK ROE: akshare.stock_financial_hk_analysis_indicator_em col ROE_AVG ÷100
+- A_SHARE+HK FCF: not available in public endpoints — always None
+- A_SHARE+HK pe_forward: vendors don't expose consensus — always None
 """
 from __future__ import annotations
 
@@ -346,6 +357,14 @@ _EMPTY_FIELDS = {
     "market_cap": None,
 }
 
+# At least one of these keys MUST be in yfinance .info for the response to
+# be a real listing (and not the {"trailingPegRatio": None} stub returned
+# for unknown tickers).
+_YF_SENTINEL_KEYS = {
+    "trailingPE", "forwardPE", "freeCashflow", "returnOnEquity",
+    "marketCap", "longName", "shortName", "regularMarketPrice",
+}
+
 
 def _fields_status(values: dict) -> tuple[list[str], str]:
     """Return (missing_field_names, status) — status ok/partial."""
@@ -358,8 +377,10 @@ def _fields_status(values: dict) -> tuple[list[str], str]:
 def _fetch_us(ticker: str) -> dict:
     ticker_obj = yf.Ticker(ticker.upper())
     info = yf_retry(lambda: ticker_obj.info)
-    if not info:
-        raise ValueError(f"yfinance returned empty info for {ticker}")
+    if not info or not isinstance(info, dict):
+        raise ValueError(f"yfinance returned empty/non-dict info for {ticker}")
+    if not (set(info.keys()) & _YF_SENTINEL_KEYS):
+        raise ValueError(f"yfinance returned stub dict (no recognized fields) for {ticker}")
 
     values = {
         "pe_ttm": info.get("trailingPE"),
@@ -383,21 +404,35 @@ def _fetch_us(ticker: str) -> dict:
 
 
 def fetch_structured_fundamentals(ticker: str) -> dict:
-    """Public entry — never throws. status=error on any vendor failure."""
+    """Public entry — never throws. status=error on any vendor failure.
+
+    Args:
+        ticker: US uses bare/cased symbol (AAPL/NVDA); A-share uses 6-digit
+            code (600519); HK uses code with .HK suffix (0700.HK).
+
+    Returns:
+        Dict with keys: ticker, market (US/A_SHARE/HK/error-market),
+        pe_ttm, pe_forward, fcf, roe, market_cap (floats|None),
+        currency (str|None), as_of (YYYY-MM-DD), source (yfinance|akshare+eastmoney|None),
+        missing_fields (list[str]), status (ok|partial|error), error (str|None).
+    """
+    # Resolve market BEFORE try so error path preserves market info.
+    market_name = "unknown"
     try:
         if not isinstance(ticker, str) or not ticker.strip():
-            return _error_result(ticker, "US", "invalid ticker input")
-        market = resolve_market(ticker)
-        if market == Market.US:
+            return _error_result(ticker, "unknown", "invalid ticker input")
+        m = resolve_market(ticker)
+        market_name = m.name  # "US" / "A_SHARE" / "HK" / "CRYPTO"
+        if m == Market.US:
             return _fetch_us(ticker)
         # A_SHARE + HK branches added in subsequent tasks
-        return _error_result(ticker, str(market), f"market {market} not yet supported")
+        return _error_result(ticker, market_name, f"market {market_name} not yet supported")
     except Exception as exc:
-        return _error_result(ticker, "unknown", f"{type(exc).__name__}: {str(exc)[:200]}")
+        return _error_result(ticker, market_name, f"{type(exc).__name__}: {str(exc)[:200]}")
 
 
 def _error_result(ticker: Any, market: str, error: str) -> dict:
-    """Construct a failure result with all fields None."""
+    """Construct a failure result with all financial fields None."""
     return {
         "ticker": str(ticker) if ticker is not None else "",
         "market": market,
@@ -423,33 +458,73 @@ Expected: PASS.
 
 ```bash
 git add tradingagents/sentiment_scan/fundamentals_snapshot.py tests/sentiment_scan/test_fundamentals_snapshot.py
-git commit -m "feat(sentiment_scan): fundamentals_snapshot US branch
+git commit -m "feat(sentiment_scan): fundamentals_snapshot US branch (with sentinel-key guard)
 
 vendor-direct 抽取 PE/远期PE/FCF/ROE — yfinance .info dict 直接拿原生数值。
-A_SHARE/HK 分支在后续 task。永不抛——异常路径返 status=error。
+Sentinel-key 检查防 yfinance 对无效 ticker 返 {trailingPegRatio:None} 真值
+stub 通过 (8 个关键字段至少一个出现才接受为有效响应)。
+A_SHARE/HK 分支在后续 task。永不抛——异常路径返 status=error 保留 market 信息。
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
 
-### Task 2.3: Add A-share branch + test
+### Task 2.3: Add A-share branch — 东财 quote API for PE+市值 + akshare for ROE
 
-- [ ] **Step 1: Append failing test**
+**Real schema (实测 2026-05-28):**
+- `_eastmoney_session()` + `push2.eastmoney.com/api/qt/stock/get`，secid=`{prefix}.{code}`，fields=`f43,f57,f58,f116,f117,f162,f163,f167`
+- Eastmoney market prefix:
+  - SH (上交所) = `1`: code starts with 60 / 68 / 90
+  - SZ (深交所) = `0`: code starts with 00 / 30 / 20
+  - BJ (北交所) = `0`: code starts with 4 / 8
+- 响应字段（×100 编码注意）:
+  - `f43` ÷100 → 最新价 CNY
+  - `f57` → code; `f58` → name
+  - `f116` (原值，单位元) → 总市值
+  - `f117` (原值) → 流通市值
+  - `f163` ÷100 → **PE TTM** (使用)
+  - `f167` ÷100 → PB (本期不取)
+  - **`f163: 0` 视为 None** (停牌/ST 股的常见编码)
+- ROE: `akshare.stock_financial_abstract(symbol=code)` 第一行**精确匹配** `指标 == "净资产收益率(ROE)"` (避免子串误中 5 个 ROE 变体如 "摊薄净资产收益率"/"净资产收益率_平均_扣除非经常损益"等)。值已是 ratio (0.31)。
+
+- [ ] **Step 1: Append failing tests**
 
 Append to `tests/sentiment_scan/test_fundamentals_snapshot.py`:
 
 ```python
-def test_a_share_ticker_extracts_pe_roe_fcf_pe_forward_is_none(monkeypatch):
-    """akshare.stock_financial_abstract → wide DF with 指标 col → match rows."""
+def test_a_share_extracts_pe_marketcap_roe_via_eastmoney(monkeypatch):
+    """A 股: 东财 quote 拿 PE+市值, akshare 拿 ROE."""
     import pandas as pd
+
+    fake_quote_response = MagicMock(status_code=200)
+    fake_quote_response.json.return_value = {
+        "rc": 0,
+        "data": {
+            "f43": 128600,                        # 1286.00 价格 (×100)
+            "f57": "600519",
+            "f58": "贵州茅台",
+            "f116": 1_607_604_938_886.0,          # 总市值 ≈ 1.6 万亿元
+            "f163": 1953,                         # PE TTM 19.53 (×100)
+            "f167": 593,                          # PB 5.93
+        },
+    }
+    fake_session = MagicMock()
+    fake_session.get.return_value = fake_quote_response
+
     fake_df = pd.DataFrame({
-        "指标": ["市盈率", "净资产收益率(ROE)", "自由现金流", "总市值", "净利润"],
-        "20260331": [25.3, 0.31, 5.6e10, 3.2e12, 8.5e9],
-        "20251231": [24.0, 0.30, 5.4e10, 3.1e12, 8.2e9],
+        "指标": ["净利润", "净资产收益率(ROE)", "摊薄净资产收益率", "营业总收入"],
+        "20260331": [8.5e9, 0.31, 0.29, 5.5e10],
+        "20251231": [8.2e9, 0.30, 0.28, 5.3e10],
     })
     fake_ak = MagicMock()
     fake_ak.stock_financial_abstract.return_value = fake_df
 
     with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_session",
+        return_value=fake_session,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_http_retry",
+        side_effect=lambda fn: fn(),
+    ), patch(
         "tradingagents.sentiment_scan.fundamentals_snapshot._dep_bootstrap.ensure",
         return_value=fake_ak,
     ):
@@ -457,59 +532,128 @@ def test_a_share_ticker_extracts_pe_roe_fcf_pe_forward_is_none(monkeypatch):
 
     assert result["ticker"] == "600519"
     assert result["market"] == "A_SHARE"
-    assert result["pe_ttm"] == 25.3
-    assert result["pe_forward"] is None  # akshare doesn't expose forward consensus
-    assert result["fcf"] == 5.6e10
-    assert result["roe"] == 0.31
-    assert result["market_cap"] == 3.2e12
+    assert result["pe_ttm"] == 19.53                  # f163 / 100
+    assert result["pe_forward"] is None
+    assert result["fcf"] is None
+    assert result["roe"] == 0.31                      # 精确匹配 "净资产收益率(ROE)"，不会误中 "摊薄净资产收益率"
+    assert result["market_cap"] == 1_607_604_938_886.0
     assert result["currency"] == "CNY"
-    assert result["source"] == "akshare"
-    assert result["status"] == "partial"  # pe_forward missing → partial
-    assert result["missing_fields"] == ["pe_forward"]
+    assert result["source"] == "akshare+eastmoney"
+    assert result["status"] == "partial"
+    assert set(result["missing_fields"]) == {"pe_forward", "fcf"}
+
+
+def test_a_share_eastmoney_zero_pe_treated_as_none(monkeypatch):
+    """东财 f163: 0 视为无 PE (停牌/ST 标的的常见编码)."""
+    import pandas as pd
+    fake_quote_response = MagicMock(status_code=200)
+    fake_quote_response.json.return_value = {
+        "rc": 0,
+        "data": {
+            "f43": 50000,
+            "f57": "600555",
+            "f58": "测试",
+            "f116": 5_000_000_000.0,
+            "f163": 0,                              # 无 PE
+            "f167": 100,
+        },
+    }
+    fake_session = MagicMock(get=MagicMock(return_value=fake_quote_response))
+    fake_df = pd.DataFrame({"指标": ["净资产收益率(ROE)"], "20260331": [-0.05]})
+    fake_ak = MagicMock(stock_financial_abstract=MagicMock(return_value=fake_df))
+
+    with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_session",
+        return_value=fake_session,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_http_retry",
+        side_effect=lambda fn: fn(),
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = fetch_structured_fundamentals("600555")
+    assert result["pe_ttm"] is None                  # f163: 0 → None
+    assert result["roe"] == -0.05
+
+
+def test_a_share_secid_prefix_mapping():
+    """SH (60/68/90) = 1; SZ (00/30/20) + BJ (4/8) = 0."""
+    from tradingagents.sentiment_scan.fundamentals_snapshot import _a_share_secid
+    assert _a_share_secid("600519") == "1.600519"    # SH 主板
+    assert _a_share_secid("688981") == "1.688981"    # SH 科创板
+    assert _a_share_secid("900939") == "1.900939"    # SH B 股
+    assert _a_share_secid("000001") == "0.000001"    # SZ 主板
+    assert _a_share_secid("300866") == "0.300866"    # SZ 创业板
+    assert _a_share_secid("200568") == "0.200568"    # SZ B 股
+    assert _a_share_secid("430047") == "0.430047"    # BJ
+    assert _a_share_secid("832000") == "0.832000"    # BJ
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-
-```bash
-.venv/bin/pytest tests/sentiment_scan/test_fundamentals_snapshot.py::test_a_share_ticker_extracts_pe_roe_fcf_pe_forward_is_none -v
-```
-
-Expected: FAIL with `market Market.A_SHARE not yet supported`.
+- [ ] **Step 2: Run** — Expected FAIL (`_fetch_a_share` / `_a_share_secid` not defined).
 
 - [ ] **Step 3: Implement A-share branch**
 
-Add to `fundamentals_snapshot.py`:
+Add to `fundamentals_snapshot.py` (after `_fetch_us`, before `fetch_structured_fundamentals`):
 
 ```python
+import pandas as pd
+
 from tradingagents.dataflows import _dep_bootstrap
+from tradingagents.dataflows.akshare_china import (
+    _eastmoney_session,
+    _eastmoney_http_retry,
+)
 
-# Map A-share Chinese indicator labels → our structured field names.
-# akshare.stock_financial_abstract returns rows keyed by 指标; we match
-# substring (some versions append units like "(亿元)" to the label).
-_A_SHARE_LABEL_MAP = [
-    ("pe_ttm", ("市盈率",)),                    # match "市盈率" or "市盈率(TTM)"
-    ("roe", ("净资产收益率",)),                  # ROE
-    ("fcf", ("自由现金流",)),                    # may be absent in some periods
-    ("market_cap", ("总市值",)),
-]
+_EASTMONEY_QUOTE_URL = "http://push2.eastmoney.com/api/qt/stock/get"
+_EASTMONEY_UT = "fa5fd1943c7b386f172d6893dbfba10b"  # eastmoney public ut token
+_EASTMONEY_FIELDS = "f43,f57,f58,f116,f117,f162,f163,f167"
 
 
-def _extract_a_share_value(df, candidate_labels: tuple[str, ...]) -> float | None:
-    """Find row whose 指标 contains any candidate label, return latest period value."""
-    import pandas as pd  # local import (test isolation)
+def _a_share_secid(code: str) -> str:
+    """A 股 eastmoney secid prefix.
 
-    if "指标" not in df.columns:
+    SH (上交所) = 1: code starts with 60 / 68 / 90
+    SZ (深交所) = 0: code starts with 00 / 30 / 20
+    BJ (北交所) = 0: code starts with 4 / 8
+    """
+    if code.startswith(("60", "68", "90")):
+        return f"1.{code}"
+    return f"0.{code}"   # 涵盖 SZ + BJ
+
+
+def _eastmoney_quote(secid: str) -> dict:
+    """Fetch eastmoney quote dict (bypass akshare wrapper, hit push2 directly)."""
+    session = _eastmoney_session()
+    params = {"secid": secid, "fields": _EASTMONEY_FIELDS, "ut": _EASTMONEY_UT}
+    r = _eastmoney_http_retry(
+        lambda: session.get(_EASTMONEY_QUOTE_URL, params=params, timeout=10)
+    )
+    payload = r.json()
+    return payload.get("data") or {}
+
+
+def _a_share_roe(code: str) -> float | None:
+    """Extract A-share ROE from akshare.stock_financial_abstract.
+
+    Strategy: EXACT-MATCH row 指标 == "净资产收益率(ROE)" (NOT substring;
+    avoid colliding with "摊薄净资产收益率" / "净资产收益率_平均_扣除非经常损益"
+    / "净资产收益率_平均" / "摊薄净资产收益率_扣除非经常损益").
+    Take the value from the latest 8-digit-period column.
+    """
+    ak = _dep_bootstrap.ensure("akshare")
+    df = ak.stock_financial_abstract(symbol=code)
+    if not isinstance(df, pd.DataFrame) or df.empty or "指标" not in df.columns:
         return None
     period_cols = [c for c in df.columns if str(c).isdigit() and len(str(c)) == 8]
     if not period_cols:
         return None
     latest = max(period_cols)
     for _, row in df.iterrows():
-        label = str(row["指标"])
-        if any(needle in label for needle in candidate_labels):
+        if str(row["指标"]).strip() == "净资产收益率(ROE)":
             val = row[latest]
             if pd.isna(val):
-                return None
+                continue
             try:
                 return float(val)
             except (TypeError, ValueError):
@@ -519,17 +663,22 @@ def _extract_a_share_value(df, candidate_labels: tuple[str, ...]) -> float | Non
 
 def _fetch_a_share(ticker: str) -> dict:
     code = ticker.strip().upper().split(".")[0]
-    ak = _dep_bootstrap.ensure("akshare")
-    df = ak.stock_financial_abstract(symbol=code)
+    secid = _a_share_secid(code)
+
+    quote = _eastmoney_quote(secid)
+    f163 = quote.get("f163")
+    pe_ttm = f163 / 100.0 if f163 and f163 > 0 else None   # ×100 编码; 0 视为 None
+    market_cap = quote.get("f116") or None
+
+    roe = _a_share_roe(code)
 
     values: dict[str, float | None] = {
-        "pe_ttm": None, "pe_forward": None, "fcf": None,
-        "roe": None, "market_cap": None,
+        "pe_ttm": pe_ttm,
+        "pe_forward": None,    # akshare 不暴露 forward consensus
+        "fcf": None,           # aggregate FCF 在公开端点不可得
+        "roe": roe,
+        "market_cap": market_cap,
     }
-    for field, labels in _A_SHARE_LABEL_MAP:
-        values[field] = _extract_a_share_value(df, labels)
-    # akshare does not expose forward PE — leave None on purpose.
-
     missing, status = _fields_status(values)
     return {
         "ticker": code,
@@ -537,150 +686,222 @@ def _fetch_a_share(ticker: str) -> dict:
         **values,
         "currency": "CNY",
         "as_of": datetime.now().strftime("%Y-%m-%d"),
-        "source": "akshare",
+        "source": "akshare+eastmoney",
         "missing_fields": missing,
         "status": status,
         "error": None,
     }
 ```
 
-And update the dispatch in `fetch_structured_fundamentals` to call `_fetch_a_share` when `market == Market.A_SHARE`.
+Update `fetch_structured_fundamentals` dispatcher to call `_fetch_a_share` when `m == Market.A_SHARE`.
 
-- [ ] **Step 4: Run test to verify pass**
-
-```bash
-.venv/bin/pytest tests/sentiment_scan/test_fundamentals_snapshot.py -v
-```
-
-Expected: 2 passed.
+- [ ] **Step 4: Run all tests** — Expected: 4 passed (US + 3 A-share).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add tradingagents/sentiment_scan/fundamentals_snapshot.py tests/sentiment_scan/test_fundamentals_snapshot.py
-git commit -m "feat(sentiment_scan): fundamentals_snapshot A 股分支
+git commit -m "feat(sentiment_scan): fundamentals_snapshot A 股分支 (东财 quote + akshare ROE)
 
-akshare.stock_financial_abstract → 中文行名抽 PE/ROE/FCF/总市值。
-pe_forward 故意留 None（akshare 不暴露 forward consensus）→ status=partial。
+A 股 PE TTM + 总市值: 走东财 push2.eastmoney.com/api/qt/stock/get
+(绕过 akshare 包装函数, 复用 akshare_china.py:_eastmoney_session +
+_eastmoney_http_retry; trust_env=False 绕代理拦截)。secid prefix
+1/0 自动判 SH/SZ/BJ。f163/f167 ×100 编码自动除 100; f163=0 视为 None。
+ROE: akshare.stock_financial_abstract 精确匹配 \"净资产收益率(ROE)\" 行
+(避免子串误中 \"摊薄净资产收益率\" 等 5 个 ROE 变体)。
+FCF + pe_forward 留 None (端点不暴露 aggregate / forward consensus)。
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
 
-### Task 2.4: Add HK branch + test
+### Task 2.4: Add HK branch — 东财 quote API + akshare ROE 转 ratio
 
-- [ ] **Step 1: Append failing test**
+**Real schema (实测 2026-05-28):**
+- secid = `116.{zfill5}` — 实测 `116.00700` → 腾讯; `116.0700` (4-digit) → API rc=100 失败
+- 同样字段 f43/f163/f167/f116
+- ROE: `akshare.stock_financial_hk_analysis_indicator_em(symbol=code5)` 列 `ROE_AVG` 单位**百分点 (21.13)**，**必须 ÷100 转 ratio (0.2113)** 才与 US/A股 returnOnEquity ratio 形式一致
+
+- [ ] **Step 1: Append failing tests**
 
 ```python
-def test_hk_ticker_extracts_pe_roe(monkeypatch):
-    """akshare.stock_financial_hk_analysis_indicator_em → wide DF, column-form."""
+def test_hk_extracts_pe_marketcap_roe_via_eastmoney(monkeypatch):
+    """HK: secid=116.{zfill5}, ROE_AVG ÷100 转 ratio."""
     import pandas as pd
+
+    fake_quote_response = MagicMock(status_code=200)
+    fake_quote_response.json.return_value = {
+        "rc": 0,
+        "data": {
+            "f43": 421800,                        # 4218.00 HKD (×100)
+            "f57": "00700",
+            "f58": "腾讯控股",
+            "f116": 3_845_998_292_193.0,          # 3.85 万亿 HKD
+            "f163": 1711,                         # PE TTM 17.11
+            "f167": 301,
+        },
+    }
+    fake_session = MagicMock(get=MagicMock(return_value=fake_quote_response))
+
     fake_df = pd.DataFrame([{
         "REPORT_DATE": "2026-03-31",
-        "PE_TTM": 18.5,
-        "ROE_AVG": 0.22,
-        "MARKET_CAP": 5.4e12,
+        "ROE_AVG": 21.13,                          # 百分点 - 需 ÷100
         "CURRENCY": "HKD",
     }])
-    fake_ak = MagicMock()
-    fake_ak.stock_financial_hk_analysis_indicator_em.return_value = fake_df
+    fake_ak = MagicMock(
+        stock_financial_hk_analysis_indicator_em=MagicMock(return_value=fake_df),
+    )
 
     with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_session",
+        return_value=fake_session,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_http_retry",
+        side_effect=lambda fn: fn(),
+    ), patch(
         "tradingagents.sentiment_scan.fundamentals_snapshot._dep_bootstrap.ensure",
         return_value=fake_ak,
     ):
         result = fetch_structured_fundamentals("0700.HK")
 
+    assert result["ticker"] == "00700.HK"
     assert result["market"] == "HK"
-    assert result["pe_ttm"] == 18.5
+    assert result["pe_ttm"] == 17.11
     assert result["pe_forward"] is None
-    assert result["roe"] == 0.22
-    assert result["market_cap"] == 5.4e12
+    assert result["fcf"] is None
+    assert result["roe"] == pytest.approx(0.2113, abs=1e-4)   # 21.13 / 100
+    assert result["market_cap"] == 3_845_998_292_193.0
     assert result["currency"] == "HKD"
-    assert result["source"] == "akshare"
-    assert "pe_forward" in result["missing_fields"]
-    assert "fcf" in result["missing_fields"]  # HK endpoint doesn't expose FCF
+    assert result["source"] == "akshare+eastmoney"
+
+
+def test_hk_secid_format():
+    from tradingagents.sentiment_scan.fundamentals_snapshot import _hk_secid
+    assert _hk_secid("0700") == "116.00700"        # 4-digit zero-pad
+    assert _hk_secid("00700") == "116.00700"
+    assert _hk_secid("0700.HK") == "116.00700"
+    assert _hk_secid("9988.HK") == "116.09988"     # 阿里
+    assert _hk_secid("01024") == "116.01024"
 ```
 
-- [ ] **Step 2: Run test to fail** — Expected: `market Market.HK not yet supported`.
+- [ ] **Step 2: Run** — Expected FAIL.
 
 - [ ] **Step 3: Implement HK branch**
 
 ```python
-_HK_COLUMN_MAP = {
-    "pe_ttm": ("PE_TTM",),
-    "roe": ("ROE_AVG", "ROE"),
-    "market_cap": ("MARKET_CAP",),
-    # akshare HK endpoint doesn't expose FCF or forward PE
-}
+def _hk_secid(ticker: str) -> str:
+    """HK secid: '116.' + 5-digit zero-padded code (4-digit must be zfilled)."""
+    raw = ticker.strip().upper()
+    if raw.endswith(".HK"):
+        raw = raw[:-3]
+    return f"116.{raw.zfill(5)}"
+
+
+def _hk_roe(code5: str) -> tuple[float | None, str]:
+    """Extract HK ROE (as ratio) + currency from akshare HK indicator endpoint.
+
+    ROE_AVG 单位是百分点 (e.g. 21.13) — divide by 100 to match ratio form
+    (US/A_SHARE both use ratio).
+    """
+    ak = _dep_bootstrap.ensure("akshare")
+    df = ak.stock_financial_hk_analysis_indicator_em(symbol=code5)
+    roe: float | None = None
+    currency = "HKD"
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        row = df.iloc[0]
+        for col in ("ROE_AVG", "ROE"):
+            if col in df.columns:
+                v = row.get(col)
+                if not pd.isna(v):
+                    try:
+                        roe = float(v) / 100.0      # 百分点 → ratio
+                    except (TypeError, ValueError):
+                        pass
+                    break
+        cur = row.get("CURRENCY")
+        if isinstance(cur, str) and cur.strip():
+            currency = cur
+    return roe, currency
 
 
 def _fetch_hk(ticker: str) -> dict:
     raw = ticker.strip().upper()
     if raw.endswith(".HK"):
         raw = raw[:-3]
-    code = raw.zfill(5)
-    ak = _dep_bootstrap.ensure("akshare")
-    df = ak.stock_financial_hk_analysis_indicator_em(symbol=code)
+    code5 = raw.zfill(5)
+    secid = _hk_secid(ticker)
 
-    import pandas as pd
+    quote = _eastmoney_quote(secid)
+    f163 = quote.get("f163")
+    pe_ttm = f163 / 100.0 if f163 and f163 > 0 else None
+    market_cap = quote.get("f116") or None
+
+    roe, currency = _hk_roe(code5)
+
     values: dict[str, float | None] = {
-        "pe_ttm": None, "pe_forward": None, "fcf": None,
-        "roe": None, "market_cap": None,
+        "pe_ttm": pe_ttm,
+        "pe_forward": None,
+        "fcf": None,
+        "roe": roe,
+        "market_cap": market_cap,
     }
-    if isinstance(df, pd.DataFrame) and not df.empty:
-        row = df.iloc[0]
-        for field, candidates in _HK_COLUMN_MAP.items():
-            for col in candidates:
-                if col in df.columns:
-                    val = row[col]
-                    if not pd.isna(val):
-                        try:
-                            values[field] = float(val)
-                        except (TypeError, ValueError):
-                            pass
-                        break
-
-    currency = "HKD"
-    if isinstance(df, pd.DataFrame) and not df.empty and "CURRENCY" in df.columns:
-        cur_val = df.iloc[0]["CURRENCY"]
-        if isinstance(cur_val, str) and cur_val:
-            currency = cur_val
-
     missing, status = _fields_status(values)
     return {
-        "ticker": f"{code}.HK",
+        "ticker": f"{code5}.HK",
         "market": "HK",
         **values,
         "currency": currency,
         "as_of": datetime.now().strftime("%Y-%m-%d"),
-        "source": "akshare",
+        "source": "akshare+eastmoney",
         "missing_fields": missing,
         "status": status,
         "error": None,
     }
 ```
 
-Wire into the dispatcher.
+Wire into dispatcher (`elif m == Market.HK: return _fetch_hk(ticker)`).
 
-- [ ] **Step 4: Run all tests** — Expected: 3 passed.
+- [ ] **Step 4: Run** — Expected 6 passed (US + 3 A-share + 2 HK).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add tradingagents/sentiment_scan/fundamentals_snapshot.py tests/sentiment_scan/test_fundamentals_snapshot.py
-git commit -m "feat(sentiment_scan): fundamentals_snapshot HK 分支
+git commit -m "feat(sentiment_scan): fundamentals_snapshot HK 分支 (东财 quote + akshare ROE)
 
-akshare.stock_financial_hk_analysis_indicator_em → 列名 PE_TTM/ROE_AVG/MARKET_CAP。
-FCF + 远期 PE 都 None（端点不暴露），status=partial。
+HK PE TTM + 总市值: 同 A 股套路走东财 quote API, secid=116.{zfill5}
+(4 位代码必须 zfill 到 5 位, 否则 push2 返 rc=100)。
+ROE: akshare.stock_financial_hk_analysis_indicator_em 列 ROE_AVG,
+     单位百分点 ÷100 转 ratio 与 US/A 股一致。
+FCF + pe_forward 留 None (端点不暴露)。
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
 
-### Task 2.5: Add never-throws test matrix (vendor exception + 5 bad inputs)
+### Task 2.5: Add never-throws matrix + deterministic stub-dict test
 
-- [ ] **Step 1: Append 6 tests**
+- [ ] **Step 1: Append tests**
 
 ```python
+def test_yfinance_stub_dict_returns_error_deterministic():
+    """yfinance 对无效 ticker 返 {trailingPegRatio: None} truthy stub.
+    Sentinel-key 应拒识别 → outer try catches → status=error.
+    完全 mock 不打网络 — deterministic 测试 (replaces v1 plan 中真发 yahoo
+    HTTP 的 INVALID_NOT_A_TICKER parametrize case)."""
+    fake_ticker = MagicMock()
+    fake_ticker.info = {"trailingPegRatio": None}   # 真实 stub shape
+    with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot.yf.Ticker",
+        return_value=fake_ticker,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot.yf_retry",
+        side_effect=lambda fn: fn(),
+    ):
+        result = fetch_structured_fundamentals("FAKEXYZ")
+    assert result["status"] == "error"
+    assert ("stub" in result["error"]) or ("no recognized fields" in result["error"])
+    assert result["market"] == "US"   # market 在 error path 仍保留
+
+
 def test_yfinance_exception_returns_error_status():
     with patch(
         "tradingagents.sentiment_scan.fundamentals_snapshot.yf.Ticker",
@@ -690,47 +911,70 @@ def test_yfinance_exception_returns_error_status():
     assert result["status"] == "error"
     assert "RuntimeError" in result["error"]
     assert result["pe_ttm"] is None
-    assert result["pe_forward"] is None
+    assert result["market"] == "US"   # ground-truth: market preserved on error
 
 
-def test_akshare_exception_returns_error_status():
+def test_a_share_eastmoney_failure_then_akshare_failure_returns_error_status():
+    """两个 vendor 都挂时 status=error 不抛."""
+    fake_session = MagicMock()
+    fake_session.get.side_effect = RuntimeError("eastmoney down")
     fake_ak = MagicMock()
-    fake_ak.stock_financial_abstract.side_effect = RuntimeError("akshare 500")
+    fake_ak.stock_financial_abstract.side_effect = RuntimeError("akshare down")
     with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_session",
+        return_value=fake_session,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_http_retry",
+        side_effect=lambda fn: fn(),
+    ), patch(
         "tradingagents.sentiment_scan.fundamentals_snapshot._dep_bootstrap.ensure",
         return_value=fake_ak,
     ):
         result = fetch_structured_fundamentals("600519")
     assert result["status"] == "error"
+    assert result["market"] == "A_SHARE"
 
 
-@pytest.mark.parametrize("bad", [None, "", "INVALID_NOT_A_TICKER_AT_ALL_!!!", [], 12345])
+@pytest.mark.parametrize("bad", [None, "", [], 12345])
 def test_bad_inputs_never_throw(bad):
-    # Must not raise — return dict with status="error".
+    """非字符串/空串/list/int → status=error，不抛."""
     result = fetch_structured_fundamentals(bad)  # type: ignore[arg-type]
     assert isinstance(result, dict)
     assert result["status"] == "error"
     assert result["pe_ttm"] is None
 ```
 
-- [ ] **Step 2: Run tests**
+Note: 不放 `"INVALID_NOT_A_TICKER_AT_ALL_!!!"` 到 parametrize（v1 plan 那个真发 yahoo HTTP；deterministic stub-dict 测试已覆盖等价行为，更快更稳）。
+
+- [ ] **Step 2: Run all tests**
 
 ```bash
 .venv/bin/pytest tests/sentiment_scan/test_fundamentals_snapshot.py -v
 ```
 
-Expected: all 9 (or 8 — parametrize collapses to one item per case) pass without code change because the outer `try/except Exception` in `fetch_structured_fundamentals` already absorbs them. If any FAIL, fix the dispatcher to also handle non-str ticker before calling `resolve_market`.
+Expected: 10 passed (US 1 + A-share 3 + HK 2 + never-throws 3 + bad-inputs 1 parametrize × 4 cases = 1 test row collapsing into 4 results... pytest reports as 10 total).
 
-- [ ] **Step 3: Mutation test (sanity check)** — temporarily change `_fetch_us` to `raise RuntimeError("forced")` inside the try block, re-run tests. The `test_yfinance_exception_returns_error_status` should still pass (because outer try catches), but `test_us_ticker_returns_full_fields` should FAIL. Revert the mutation. This proves the success-path test has bite.
+- [ ] **Step 3: Mutation test (sanity check)** — temporarily change `_fetch_us` to `raise RuntimeError("forced")` inside the function, re-run tests. `test_us_ticker_returns_full_fields` should FAIL; `test_yfinance_stub_dict_returns_error_deterministic` should still pass (outer try catches). Revert.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Final baseline check**
+
+```bash
+.venv/bin/pytest tests/web/ tests/test_cli_backend_url_override.py tests/test_rating_signal_action_map.py tests/sentiment_scan/ -q
+```
+
+Expected: 80 + 10 = 90 passed.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add tests/sentiment_scan/test_fundamentals_snapshot.py
-git commit -m "test(sentiment_scan): fundamentals_snapshot never-throws matrix
+git commit -m "test(sentiment_scan): never-throws matrix + deterministic stub-dict 守护
 
-加 7 个测试覆盖 vendor 异常 + 5 种坏输入（None/空串/无效字符串/list/int）。
-所有路径必须返 dict 不抛。
+deterministic test: yfinance stub-dict {trailingPegRatio:None} → status=error
+(完全不打网络 mock; replaces v1 plan 真发 yahoo HTTP 的 INVALID_TICKER
+parametrize case)。Error path 也覆盖 market preservation (status=error 时
+market 仍 = US/A_SHARE 不变成 unknown)。
+四个 vendor 失败 path: yf exception / eastmoney+akshare 双 down / 4 种坏输入。
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
