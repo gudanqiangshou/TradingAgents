@@ -214,3 +214,112 @@ def test_analyze_with_no_feishu_rejected(monkeypatch):
     monkeypatch.setattr(mod.sys, "argv", ["s.py", "--analyze", "--no-feishu"])
     with pytest.raises(SystemExit):
         mod.main()
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: report_dir wiring + snapshot.report_paths
+# ---------------------------------------------------------------------------
+
+def test_default_reports_dir_uses_env_var_with_reports_subdir(monkeypatch, tmp_path):
+    """_default_reports_dir respects TRADINGAGENTS_SENTIMENT_SCAN_DIR and
+    appends a /reports/<DATE>/ subpath."""
+    from scripts.daily_sentiment_scan import _default_reports_dir
+
+    monkeypatch.setenv("TRADINGAGENTS_SENTIMENT_SCAN_DIR", str(tmp_path))
+    result = _default_reports_dir("2026-05-28")
+    assert result == str(tmp_path / "reports" / "2026-05-28")
+
+
+def test_analyze_subcommand_passes_report_dir_to_run_batch(tmp_path, monkeypatch):
+    """_cmd_analyze MUST pass report_dir=<scan_dir>/reports/<DATE> to run_batch."""
+    from scripts.daily_sentiment_scan import _cmd_analyze
+
+    monkeypatch.setenv("TRADINGAGENTS_SENTIMENT_SCAN_DIR", str(tmp_path))
+    expected_reports_dir = str(tmp_path / "reports" / "2026-05-28")
+
+    fake_sec_a = MagicMock(display="A", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={"600519": "茅台"})
+    fake_sec_b = MagicMock(display="B", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={})
+    fake_sec_c = MagicMock(display="C", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={})
+    fake_sec_d = MagicMock(display="D", top20_codes=[],
+                          rank_by_code={}, summary_by_code={})
+
+    fake_fund = {
+        "pe_ttm": None, "pe_forward": None, "fcf": None, "roe": None,
+        "market_cap": None, "currency": "CNY", "as_of": "2026-05-28",
+        "source": "akshare", "missing_fields": [], "status": "ok",
+    }
+    fake_batch_result = [{
+        "ticker": "600519", "status": "ok",
+        "decision": {"rating": "Hold", "action": "HOLD", "summary_1line": "..."},
+        "error": None, "elapsed_seconds": 1,
+        "report_paths": {},
+    }]
+
+    output = tmp_path / "snapshot.json"
+    with patch("scripts.daily_sentiment_scan.section_a_hot_up_rank", return_value=fake_sec_a), \
+         patch("scripts.daily_sentiment_scan.section_b_lhb", return_value=fake_sec_b), \
+         patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value=fake_sec_c), \
+         patch("scripts.daily_sentiment_scan.section_d_stocktwits", return_value=fake_sec_d), \
+         patch("scripts.daily_sentiment_scan.fetch_structured_fundamentals", return_value=fake_fund), \
+         patch("scripts.daily_sentiment_scan.run_batch", return_value=fake_batch_result) as mock_run_batch:
+        _cmd_analyze(date="2026-05-28", output_path=str(output))
+
+    # Verify run_batch was called with our expected report_dir
+    assert mock_run_batch.called
+    _, kwargs = mock_run_batch.call_args
+    assert kwargs.get("report_dir") == expected_reports_dir
+    # And the dir was created
+    import os as _os
+    assert _os.path.isdir(expected_reports_dir)
+
+
+def test_analyze_subcommand_includes_report_paths_in_snapshot(tmp_path, monkeypatch):
+    """Snapshot analyses[i].report_paths MUST be propagated from run_batch result."""
+    from scripts.daily_sentiment_scan import _cmd_analyze
+
+    monkeypatch.setenv("TRADINGAGENTS_SENTIMENT_SCAN_DIR", str(tmp_path))
+
+    fake_sec_a = MagicMock(display="A", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={"600519": "茅台"})
+    fake_sec_b = MagicMock(display="B", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={})
+    fake_sec_c = MagicMock(display="C", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={})
+    fake_sec_d = MagicMock(display="D", top20_codes=[],
+                          rank_by_code={}, summary_by_code={})
+
+    fake_fund = {
+        "pe_ttm": None, "pe_forward": None, "fcf": None, "roe": None,
+        "market_cap": None, "currency": "CNY", "as_of": "2026-05-28",
+        "source": "akshare", "missing_fields": [], "status": "ok",
+    }
+    expected_paths = {
+        "fundamentals_report": "/abs/path/fundamentals_report.md",
+        "news_report": "/abs/path/news_report.md",
+        "investment_plan": "/abs/path/investment_plan.md",
+        "trader_investment_plan": "/abs/path/trader_investment_plan.md",
+        "final_trade_decision": "/abs/path/final_trade_decision.md",
+    }
+    fake_batch_result = [{
+        "ticker": "600519", "status": "ok",
+        "decision": {"rating": "Hold", "action": "HOLD", "summary_1line": "..."},
+        "error": None, "elapsed_seconds": 1,
+        "report_paths": expected_paths,
+    }]
+
+    output = tmp_path / "snapshot.json"
+    with patch("scripts.daily_sentiment_scan.section_a_hot_up_rank", return_value=fake_sec_a), \
+         patch("scripts.daily_sentiment_scan.section_b_lhb", return_value=fake_sec_b), \
+         patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value=fake_sec_c), \
+         patch("scripts.daily_sentiment_scan.section_d_stocktwits", return_value=fake_sec_d), \
+         patch("scripts.daily_sentiment_scan.fetch_structured_fundamentals", return_value=fake_fund), \
+         patch("scripts.daily_sentiment_scan.run_batch", return_value=fake_batch_result):
+        _cmd_analyze(date="2026-05-28", output_path=str(output))
+
+    data = json.loads(output.read_text())
+    assert len(data["analyses"]) == 1
+    assert data["analyses"][0]["code"] == "600519"
+    assert data["analyses"][0]["report_paths"] == expected_paths

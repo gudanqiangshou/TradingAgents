@@ -637,6 +637,21 @@ def _default_snapshot_path(date: str) -> str:
     return os.path.join(base, f"{date}.json")
 
 
+def _default_reports_dir(date: str) -> str:
+    """Markdown reports root for one date: <base>/reports/<DATE>/.
+
+    Each ticker gets its own subdirectory <DATE>/<code>/ containing the 5
+    markdown files (fundamentals_report.md, news_report.md, …). Same env-var
+    pivot as _default_snapshot_path so a relocated SCAN_DIR keeps reports
+    alongside their snapshot.
+    """
+    base = os.environ.get(
+        "TRADINGAGENTS_SENTIMENT_SCAN_DIR",
+        os.path.expanduser("~/.tradingagents/sentiment-scan"),
+    )
+    return os.path.join(base, "reports", date)
+
+
 def _section_result_to_dict(sec) -> dict:
     return {
         "display": sec.display,
@@ -677,8 +692,14 @@ def _cmd_analyze(date: str, output_path: str) -> int:
                 "c": sec_c.rank_by_code.get(code),
             }
 
-    # Run batch analyses (TradingAgents).
-    batch_results = run_batch(intersection, date, hard_deadline)
+    # Run batch analyses (TradingAgents). Mkdir the reports root upfront so a
+    # missing parent never fails a per-ticker write — only disk-full does.
+    report_dir = _default_reports_dir(date)
+    try:
+        os.makedirs(report_dir, exist_ok=True)
+    except OSError as exc:
+        _log.warning("could not create reports dir %s: %s", report_dir, exc)
+    batch_results = run_batch(intersection, date, hard_deadline, report_dir=report_dir)
 
     # Per-ticker: fetch fundamentals + merge with batch result.
     name_by_code = {c: _name_from_sections(c, sec_a, sec_b, sec_c) for c in tier_by_code}
@@ -702,6 +723,7 @@ def _cmd_analyze(date: str, output_path: str) -> int:
             "status": r["status"],
             "error": r.get("error"),
             "elapsed_seconds": r.get("elapsed_seconds", 0),
+            "report_paths": r.get("report_paths", {}),
         })
 
     snapshot = {
