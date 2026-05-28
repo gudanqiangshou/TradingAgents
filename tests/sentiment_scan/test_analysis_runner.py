@@ -100,3 +100,47 @@ def test_apply_china_vendor_overlay_exception_returns_error():
     ):
         result = run_single_analysis("600519", "2026-05-27", deadline)
     assert result["status"] == "error"
+
+
+def test_apply_china_vendor_overlay_is_called_with_ticker():
+    from tradingagents.sentiment_scan.analysis_runner import run_single_analysis
+
+    fake_graph = MagicMock()
+    fake_graph.graph.stream.return_value = iter([{"final_trade_decision": "Rating: Hold"}])
+    fake_graph.propagator.create_initial_state.return_value = {}
+    fake_graph.propagator.get_graph_args.return_value = {}
+
+    deadline = datetime.now() + timedelta(minutes=30)
+    with patch(
+        "tradingagents.sentiment_scan.analysis_runner.TradingAgentsGraph",
+        return_value=fake_graph,
+    ), patch(
+        "tradingagents.sentiment_scan.analysis_runner.apply_china_vendor_overlay"
+    ) as mock_overlay:
+        run_single_analysis("600519", "2026-05-27", deadline)
+    # Verify the China-vendor overlay was applied with the ticker (akshare routing).
+    assert mock_overlay.called
+    args, kwargs = mock_overlay.call_args
+    assert args[1] == "600519"  # second positional arg is ticker
+
+
+def test_gc_collect_called_in_finally():
+    """gc.collect must run regardless of inner success/failure."""
+    from tradingagents.sentiment_scan.analysis_runner import run_single_analysis
+
+    fake_graph = MagicMock()
+    fake_graph.graph.stream.return_value = iter([{"final_trade_decision": "Rating: Hold"}])
+    fake_graph.propagator.create_initial_state.return_value = {}
+    fake_graph.propagator.get_graph_args.return_value = {}
+
+    deadline = datetime.now() + timedelta(minutes=30)
+    with patch(
+        "tradingagents.sentiment_scan.analysis_runner.TradingAgentsGraph",
+        return_value=fake_graph,
+    ), patch(
+        "tradingagents.sentiment_scan.analysis_runner.apply_china_vendor_overlay"
+    ), patch(
+        "tradingagents.sentiment_scan.analysis_runner.gc.collect"
+    ) as mock_gc:
+        run_single_analysis("600519", "2026-05-27", deadline)
+    assert mock_gc.called
