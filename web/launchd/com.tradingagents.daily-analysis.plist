@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE — do NOT load as-is.
+
+  This LaunchAgent fires at 06:30 Mon-Fri and runs the analysis subcommand
+  which writes ~/.tradingagents/sentiment-scan/<DATE>.json. The companion
+  daily-feishu-push plist reads that JSON at 09:05.
+
+  Install:
+    cp web/launchd/com.tradingagents.daily-analysis.plist ~/Library/LaunchAgents/
+    mkdir -p ~/.tradingagents/sentiment-scan
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-analysis.plist
+
+  Test manually (out-of-cycle):
+    launchctl kickstart -k gui/$(id -u)/com.tradingagents.daily-analysis
+
+  Unload:
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-analysis.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tradingagents.daily-analysis</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/a1/TradingAgents/.venv/bin/python</string>
+        <string>/Users/a1/TradingAgents/scripts/daily_sentiment_scan.py</string>
+        <string>--analyze</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/a1/TradingAgents</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/Users/a1/.tradingagents/logs/daily-analysis-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/a1/.tradingagents/logs/daily-analysis-stderr.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
