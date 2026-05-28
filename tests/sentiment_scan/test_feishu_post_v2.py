@@ -1,5 +1,6 @@
 """Tests for feishu_post_v2.build_feishu_post."""
 import pytest
+from unittest.mock import patch
 
 
 def _make_snapshot() -> dict:
@@ -247,3 +248,83 @@ def test_failure_card_omits_full_report_link():
     for code in ("TIMEOUT1", "ERROR1", "INCMP1", "BUDG1"):
         viewer_links = [l for l in _find_link_elements(payload, code) if "/sentiment-scan/" in l["href"]]
         assert viewer_links == [], f"failure-status code {code} must not have viewer link"
+
+
+# ---------------------------------------------------------------------------
+# Codex I6 — robustness against malformed snapshot
+# ---------------------------------------------------------------------------
+
+def test_build_feishu_post_filters_non_dict_analyses():
+    """analyses entries that aren't dicts (str / None / int) must NOT crash
+    the builder. They are silently filtered; remaining dict entries still
+    render. The 09:05 push reads a file written 2.5h earlier — corruption
+    is unlikely but the builder must be hardened against it.
+    """
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    snap = _make_snapshot()
+    # Mix in some garbage entries
+    snap["analyses"] = ["bad-string", None, 42] + snap["analyses"]
+    # Should not raise
+    payload = build_feishu_post(snap, "2026-05-27")
+    assert payload["msg_type"] == "post"
+    # The 2 legitimate dict entries still produce cards
+    blob = str(payload)
+    assert "600519" in blob
+    assert "300866" in blob
+
+
+def test_build_feishu_post_handles_non_dict_snapshot():
+    """If the whole snapshot is somehow not a dict, return a minimal post."""
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    # Should not raise
+    payload = build_feishu_post("not-a-dict", "2026-05-27")  # type: ignore[arg-type]
+    assert payload["msg_type"] == "post"
+
+
+def test_build_feishu_post_handles_non_list_analyses():
+    """analyses present but not a list (e.g. a dict by mistake) — should
+    not raise."""
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    snap = _make_snapshot()
+    snap["analyses"] = {"oops": "wrong shape"}
+    payload = build_feishu_post(snap, "2026-05-27")
+    assert payload["msg_type"] == "post"
+
+
+def test_cmd_push_falls_back_to_alert_on_builder_exception(tmp_path, monkeypatch):
+    """If build_feishu_post raises, _cmd_push must exit 0 and send the
+    degraded-alert payload — never crash the LaunchAgent."""
+    from scripts.daily_sentiment_scan import _cmd_push
+    import json
+
+    snap = {
+        "schema_version": 1, "date": "2026-05-27",
+        "sections": {
+            "section_a": {"display": "", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}},
+            "section_b": {"display": "", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}},
+            "section_c": {"display": "", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}},
+            "section_d": {"display": "", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}},
+            "intersection": {"triple": [], "ab_only": [], "ac_only": [], "bc_only": []},
+        },
+        "analyses": [],
+    }
+    snap_path = tmp_path / "2026-05-27.json"
+    snap_path.write_text(json.dumps(snap), encoding="utf-8")
+    monkeypatch.setenv("TRADINGAGENTS_FEISHU_WEBHOOK", "https://example.test/hook")
+
+    # Force the builder to raise
+    from unittest.mock import MagicMock
+    mock_response = MagicMock(status_code=200, text='{"code":0}')
+    mock_response.json.return_value = {"code": 0}
+    with patch(
+        "scripts.daily_sentiment_scan.build_feishu_post",
+        side_effect=RuntimeError("synthetic boom"),
+    ), patch("requests.post", return_value=mock_response) as mock_post:
+        rc = _cmd_push(date="2026-05-27", input_path=str(snap_path), no_feishu=False)
+    assert rc == 0
+    assert mock_post.called
+    payload = mock_post.call_args.kwargs["json"]
+    # Degraded payload structure
+    assert payload["msg_type"] == "post"
+    text_blob = str(payload)
+    assert "降级告警" in text_blob or "构建失败" in text_blob or "snapshot" in text_blob.lower()

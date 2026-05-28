@@ -702,16 +702,48 @@ def _cmd_analyze(date: str, output_path: str) -> int:
     batch_results = run_batch(intersection, date, hard_deadline, report_dir=report_dir)
 
     # Per-ticker: fetch fundamentals + merge with batch result.
+    # Codex I4: skip the vendor calls (eastmoney + akshare) for terminal-
+    # failure statuses (timeout/error/incomplete/budget_exhausted). Those
+    # tickers don't get a fundamentals row in the 飞书 card anyway, and the
+    # vendor calls happen AFTER the 08:50 hard deadline, eating into the
+    # 15-min buffer before the 09:05 push.
     name_by_code = {c: _name_from_sections(c, sec_a, sec_b, sec_c) for c in tier_by_code}
     analyses = []
+    today_str = datetime.now().strftime("%Y-%m-%d")
     for r in batch_results:
         code = r["ticker"]
-        fundamentals = fetch_structured_fundamentals(code)
-        if fundamentals.get("status") == "error":
-            _log.warning(
-                "fundamentals fetch failed for %s (market=%s): %s",
-                code, fundamentals.get("market"), fundamentals.get("error"),
-            )
+        graph_status = r["status"]
+        if graph_status in ("ok", "partial"):
+            fundamentals = fetch_structured_fundamentals(code)
+            if fundamentals.get("status") == "error":
+                _log.warning(
+                    "fundamentals fetch failed for %s (market=%s): %s",
+                    code, fundamentals.get("market"), fundamentals.get("error"),
+                )
+        else:
+            fundamentals = {
+                "pe_ttm": None, "pe_forward": None, "fcf": None, "roe": None,
+                "market_cap": None, "currency": None,
+                "as_of": today_str, "source": None,
+                "missing_fields": [
+                    "pe_ttm", "pe_forward", "fcf", "roe", "market_cap",
+                ],
+                "status": "skipped",
+                "error": f"skipped: analysis status={graph_status}",
+            }
+
+        # Codex I7: A-share / HK analyses normally have fundamentals.status =
+        # "partial" because pe_forward + fcf are always None. The 飞书 header
+        # used to count these as "完整" since it read only graph_status,
+        # producing a misleading "完整" header alongside PE — / FCF — rows.
+        # Downgrade the top-level status to "partial" when fundamentals are
+        # partial/error, so the header count matches the user-visible rows.
+        fund_status = fundamentals.get("status", "ok")
+        if graph_status == "ok" and fund_status in ("partial", "error"):
+            analysis_status = "partial"
+        else:
+            analysis_status = graph_status
+
         analyses.append({
             "code": code,
             "name": name_by_code.get(code, ""),
@@ -720,7 +752,7 @@ def _cmd_analyze(date: str, output_path: str) -> int:
             "ranks": ranks_by_code.get(code, {}),
             "fundamentals": fundamentals,
             "decision": r.get("decision"),
-            "status": r["status"],
+            "status": analysis_status,
             "error": r.get("error"),
             "elapsed_seconds": r.get("elapsed_seconds", 0),
             "report_paths": r.get("report_paths", {}),
@@ -744,7 +776,14 @@ def _cmd_analyze(date: str, output_path: str) -> int:
         "analyses": analyses,
     }
 
-    save_snapshot(output_path, snapshot)
+    # Codex I5: save_snapshot now returns False on disk error rather than
+    # raising. We still exit 0 (the 09:05 push detects the missing snapshot
+    # and sends the degraded alert) but log a clear warning for diagnosis.
+    if not save_snapshot(output_path, snapshot):
+        _log.warning(
+            "snapshot write failed for %s — 09:05 push will send degraded alert",
+            output_path,
+        )
     return 0
 
 
@@ -759,20 +798,37 @@ from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
 def _cmd_push(date: str, input_path: str, no_feishu: bool) -> int:
     """Read snapshot JSON, build 飞书 post, push to webhook."""
     snap = load_snapshot(input_path)
-    if snap is None:
-        payload = {
+
+    def _degraded_payload(reason: str) -> dict:
+        return {
             "msg_type": "post",
             "content": {
                 "post": {
                     "zh_cn": {
                         "title": f"散户情绪扫盘 {date} — 降级告警",
-                        "content": [[{"tag": "text", "text": f"⚠️ 未拿到分析快照 ({input_path})。06:30 --analyze 可能未完成或被中止。"}]],
+                        "content": [[{"tag": "text", "text": reason}]],
                     }
                 }
             },
         }
+
+    if snap is None:
+        payload = _degraded_payload(
+            f"⚠️ 未拿到分析快照 ({input_path})。06:30 --analyze 可能未完成或被中止。"
+        )
     else:
-        payload = build_feishu_post(snap, date)
+        # Codex I6: even with a valid snapshot, the builder could blow up on
+        # a malformed-but-typed payload that slipped past schema_version
+        # (e.g. snapshot["analyses"][0] is a string). Fall back to the
+        # degraded alert rather than crashing the LaunchAgent.
+        try:
+            payload = build_feishu_post(snap, date)
+        except Exception as exc:  # noqa: BLE001 — degraded-alert is the fallback
+            _log.warning("build_feishu_post failed: %s", exc)
+            payload = _degraded_payload(
+                f"⚠️ 飞书消息构建失败：{type(exc).__name__}: {str(exc)[:120]}。"
+                f"原始快照仍在 {input_path}。"
+            )
 
     if no_feishu:
         return 0

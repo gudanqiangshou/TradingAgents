@@ -138,6 +138,13 @@ class TradingAgentsGraph:
         kwargs = {}
         provider = self.config.get("llm_provider", "").lower()
 
+        # Per-request timeout (Codex I3 — inner-layer guard for stuck LLM
+        # calls). All four LLM client wrappers pass this through to the
+        # underlying LangChain client's `timeout=` kwarg.
+        llm_timeout = self.config.get("llm_timeout")
+        if llm_timeout is not None:
+            kwargs["timeout"] = llm_timeout
+
         if provider == "google":
             thinking_level = self.config.get("google_thinking_level")
             if thinking_level:

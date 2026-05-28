@@ -276,6 +276,166 @@ def test_analyze_subcommand_passes_report_dir_to_run_batch(tmp_path, monkeypatch
     assert _os.path.isdir(expected_reports_dir)
 
 
+# ---------------------------------------------------------------------------
+# Codex I4 + I7: skip vendor fundamentals on failure + propagate partial status
+# ---------------------------------------------------------------------------
+
+def test_analyze_skips_fundamentals_for_terminal_failure_statuses(tmp_path, monkeypatch):
+    """fetch_structured_fundamentals must NOT be called for tickers whose
+    graph status is timeout/error/incomplete/budget_exhausted (Codex I4).
+    The eastmoney + akshare calls take seconds; doing them for failed
+    tickers eats into the 15-min buffer before the 09:05 飞书 push.
+    """
+    from scripts.daily_sentiment_scan import _cmd_analyze
+
+    monkeypatch.setenv("TRADINGAGENTS_SENTIMENT_SCAN_DIR", str(tmp_path))
+
+    fake_sec_a = MagicMock(display="A", top20_codes=["600519", "600000", "300866"],
+                          rank_by_code={"600519": 1, "600000": 2, "300866": 3},
+                          summary_by_code={
+                              "600519": "茅台", "600000": "浦发", "300866": "安克",
+                          })
+    fake_sec_b = MagicMock(display="B", top20_codes=["600519", "600000", "300866"],
+                          rank_by_code={"600519": 1, "600000": 2, "300866": 3},
+                          summary_by_code={})
+    fake_sec_c = MagicMock(display="C", top20_codes=["600519", "600000", "300866"],
+                          rank_by_code={"600519": 1, "600000": 2, "300866": 3},
+                          summary_by_code={})
+    fake_sec_d = MagicMock(display="D", top20_codes=[],
+                          rank_by_code={}, summary_by_code={})
+
+    # 1 ok + 1 timeout + 1 budget_exhausted
+    fake_batch_result = [
+        {"ticker": "600519", "status": "ok",
+         "decision": {"rating": "Overweight", "action": "BUY", "summary_1line": "..."},
+         "error": None, "elapsed_seconds": 600, "report_paths": {}},
+        {"ticker": "600000", "status": "timeout",
+         "decision": None, "error": "watchdog timeout",
+         "elapsed_seconds": 1800, "report_paths": {}},
+        {"ticker": "300866", "status": "budget_exhausted",
+         "decision": None, "error": "global deadline reached",
+         "elapsed_seconds": 0, "report_paths": {}},
+    ]
+
+    fake_fund = {
+        "pe_ttm": 25.3, "pe_forward": 22.1, "fcf": 5.6e10, "roe": 0.31,
+        "market_cap": 3.2e12, "currency": "CNY", "as_of": "2026-05-28",
+        "source": "akshare", "missing_fields": [], "status": "ok",
+        "market": "A_SHARE",
+    }
+
+    output = tmp_path / "snapshot.json"
+    with patch("scripts.daily_sentiment_scan.section_a_hot_up_rank", return_value=fake_sec_a), \
+         patch("scripts.daily_sentiment_scan.section_b_lhb", return_value=fake_sec_b), \
+         patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value=fake_sec_c), \
+         patch("scripts.daily_sentiment_scan.section_d_stocktwits", return_value=fake_sec_d), \
+         patch("scripts.daily_sentiment_scan.fetch_structured_fundamentals", return_value=fake_fund) as mock_fetch, \
+         patch("scripts.daily_sentiment_scan.run_batch", return_value=fake_batch_result):
+        _cmd_analyze(date="2026-05-28", output_path=str(output))
+
+    # Mutation guard: pre-fix, fetch was called 3x (once per ticker)
+    assert mock_fetch.call_count == 1, (
+        f"fetch_structured_fundamentals should run only for ok/partial tickers; "
+        f"called {mock_fetch.call_count}x"
+    )
+    args, _ = mock_fetch.call_args
+    assert args[0] == "600519"
+
+    # Snapshot: ok ticker has real fundamentals, failed tickers have skipped
+    data = json.loads(output.read_text())
+    by_code = {a["code"]: a for a in data["analyses"]}
+    assert by_code["600519"]["fundamentals"]["status"] == "ok"
+    assert by_code["600000"]["fundamentals"]["status"] == "skipped"
+    assert by_code["600000"]["fundamentals"]["error"] == "skipped: analysis status=timeout"
+    assert by_code["300866"]["fundamentals"]["status"] == "skipped"
+    assert by_code["300866"]["fundamentals"]["error"] == "skipped: analysis status=budget_exhausted"
+
+
+def test_analyze_downgrades_status_to_partial_when_fundamentals_partial(tmp_path, monkeypatch):
+    """Codex I7: graph status=ok + fundamentals.status=partial should result
+    in snapshot.analyses[i].status="partial". The pre-fix code wrote "ok"
+    from the graph result alone, producing a misleading 飞书 "完整" header
+    count even though PE/FCF rows showed "—".
+    """
+    from scripts.daily_sentiment_scan import _cmd_analyze
+
+    monkeypatch.setenv("TRADINGAGENTS_SENTIMENT_SCAN_DIR", str(tmp_path))
+
+    fake_sec_a = MagicMock(display="A", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={"600519": "茅台"})
+    fake_sec_b = MagicMock(display="B", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={})
+    fake_sec_c = MagicMock(display="C", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={})
+    fake_sec_d = MagicMock(display="D", top20_codes=[],
+                          rank_by_code={}, summary_by_code={})
+
+    # Graph: ok. Fundamentals: partial (typical A-share — no pe_forward / fcf).
+    fake_partial_fund = {
+        "pe_ttm": 25.3, "pe_forward": None, "fcf": None, "roe": 0.31,
+        "market_cap": 3.2e12, "currency": "CNY", "as_of": "2026-05-28",
+        "source": "akshare", "missing_fields": ["pe_forward", "fcf"],
+        "status": "partial", "market": "A_SHARE",
+    }
+    fake_batch_result = [{
+        "ticker": "600519", "status": "ok",
+        "decision": {"rating": "Overweight", "action": "BUY", "summary_1line": "..."},
+        "error": None, "elapsed_seconds": 600, "report_paths": {},
+    }]
+
+    output = tmp_path / "snapshot.json"
+    with patch("scripts.daily_sentiment_scan.section_a_hot_up_rank", return_value=fake_sec_a), \
+         patch("scripts.daily_sentiment_scan.section_b_lhb", return_value=fake_sec_b), \
+         patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value=fake_sec_c), \
+         patch("scripts.daily_sentiment_scan.section_d_stocktwits", return_value=fake_sec_d), \
+         patch("scripts.daily_sentiment_scan.fetch_structured_fundamentals", return_value=fake_partial_fund), \
+         patch("scripts.daily_sentiment_scan.run_batch", return_value=fake_batch_result):
+        _cmd_analyze(date="2026-05-28", output_path=str(output))
+
+    data = json.loads(output.read_text())
+    # Mutation guard: pre-fix this was "ok"
+    assert data["analyses"][0]["status"] == "partial"
+
+
+def test_analyze_keeps_ok_status_when_fundamentals_ok(tmp_path, monkeypatch):
+    """Sanity check: I7 must not downgrade an already-fully-ok analysis."""
+    from scripts.daily_sentiment_scan import _cmd_analyze
+
+    monkeypatch.setenv("TRADINGAGENTS_SENTIMENT_SCAN_DIR", str(tmp_path))
+
+    fake_sec_a = MagicMock(display="A", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={"600519": "茅台"})
+    fake_sec_b = MagicMock(display="B", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={})
+    fake_sec_c = MagicMock(display="C", top20_codes=["600519"],
+                          rank_by_code={"600519": 1}, summary_by_code={})
+    fake_sec_d = MagicMock(display="D", top20_codes=[],
+                          rank_by_code={}, summary_by_code={})
+
+    fake_fund_full = {
+        "pe_ttm": 25.3, "pe_forward": 22.1, "fcf": 5.6e10, "roe": 0.31,
+        "market_cap": 3.2e12, "currency": "CNY", "as_of": "2026-05-28",
+        "source": "akshare", "missing_fields": [], "status": "ok", "market": "A_SHARE",
+    }
+    fake_batch_result = [{
+        "ticker": "600519", "status": "ok",
+        "decision": {"rating": "Overweight", "action": "BUY", "summary_1line": "..."},
+        "error": None, "elapsed_seconds": 600, "report_paths": {},
+    }]
+
+    output = tmp_path / "snapshot.json"
+    with patch("scripts.daily_sentiment_scan.section_a_hot_up_rank", return_value=fake_sec_a), \
+         patch("scripts.daily_sentiment_scan.section_b_lhb", return_value=fake_sec_b), \
+         patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value=fake_sec_c), \
+         patch("scripts.daily_sentiment_scan.section_d_stocktwits", return_value=fake_sec_d), \
+         patch("scripts.daily_sentiment_scan.fetch_structured_fundamentals", return_value=fake_fund_full), \
+         patch("scripts.daily_sentiment_scan.run_batch", return_value=fake_batch_result):
+        _cmd_analyze(date="2026-05-28", output_path=str(output))
+
+    data = json.loads(output.read_text())
+    assert data["analyses"][0]["status"] == "ok"
+
+
 def test_analyze_subcommand_includes_report_paths_in_snapshot(tmp_path, monkeypatch):
     """Snapshot analyses[i].report_paths MUST be propagated from run_batch result."""
     from scripts.daily_sentiment_scan import _cmd_analyze

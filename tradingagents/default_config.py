@@ -17,6 +17,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
+    "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
 }
 
 
@@ -54,6 +55,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.4",
     "quick_think_llm": "gpt-5.4-mini",
+    # Per-request timeout (seconds) passed to the underlying LangChain client.
+    # Codex I3: analysis_runner's watchdog only fires BETWEEN langgraph
+    # chunks; a single LLM call that hangs longer than the deadline is NOT
+    # interrupted by the outer loop. This timeout is the inner-layer guard
+    # that ensures a stuck connection eventually errors out. 300s (5 min)
+    # is a generous default for reasoning models. Override via the
+    # TRADINGAGENTS_LLM_TIMEOUT env var.
+    "llm_timeout": 300,
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a

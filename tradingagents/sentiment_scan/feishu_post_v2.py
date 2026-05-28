@@ -37,6 +37,20 @@ _MANTRA_BULLETS = [
 
 def build_feishu_post(snapshot: dict, date: str) -> dict:
     """Build the 飞书 post payload from a sentiment-scan snapshot."""
+    # Codex I6: defend against malformed snapshots. The 09:05 push reads a
+    # file written 2.5 hours earlier by a separate process; if that file
+    # was tampered with or partially corrupted, `analyses` could contain
+    # non-dict entries (strings, None, integers) and `_card_for_analysis`
+    # would raise AttributeError on `a.get(...)`. Filter to dicts so the
+    # builder is robust and the rest of the cards still render.
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    raw_analyses = snapshot.get("analyses") or []
+    if not isinstance(raw_analyses, list):
+        raw_analyses = []
+    snapshot = dict(snapshot)
+    snapshot["analyses"] = [a for a in raw_analyses if isinstance(a, dict)]
+
     paragraphs: list[list] = []
 
     # 1. Header subline
