@@ -15,11 +15,17 @@ neutral `feishu_elements` module to avoid circular imports.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 # Reuse the link-rich element parser from the neutral shared module
 # (breaks the circular import with scripts/daily_sentiment_scan.py).
 from tradingagents.sentiment_scan.feishu_elements import _parse_line_to_feishu_elements
+
+# Base URL for the web viewer page that decision cards link to. Overridable
+# per-environment (local dev: http://localhost:18000). Production uses the
+# Cloudflare tunnel hostname.
+_DEFAULT_WEB_BASE_URL = "https://ta.nibajie.cc"
 
 _MANTRA_BULLETS = [
     "• A 股飙升榜 ∩ 龙虎榜 = 散户 + 机构同向 = 最强信号",
@@ -60,7 +66,7 @@ def build_feishu_post(snapshot: dict, date: str) -> dict:
             paragraphs.append(_parse_line_to_feishu_elements(line, in_stocktwits))
 
     # 6. Multi-source intersection decision cards
-    decision_paragraphs = _decision_block(snapshot)
+    decision_paragraphs = _decision_block(snapshot, date)
     if decision_paragraphs:
         paragraphs.append([{"tag": "text", "text": "━━━━━━━━ 🌟 重点关注 · 多源交集决策 ━━━━━━━━"}])
         paragraphs.extend(decision_paragraphs)
@@ -97,7 +103,7 @@ def _header_block(snapshot: dict, date: str) -> list[list]:
     return [[{"tag": "text", "text": subline}]]
 
 
-def _decision_block(snapshot: dict) -> list[list]:
+def _decision_block(snapshot: dict, date: str) -> list[list]:
     analyses = snapshot.get("analyses", [])
     if not analyses:
         return []
@@ -110,13 +116,19 @@ def _decision_block(snapshot: dict) -> list[list]:
                 continue
             if seen:
                 paragraphs.append([{"tag": "text", "text": "────────────────────────────────"}])
-            paragraphs.extend(_card_for_analysis(a))
+            paragraphs.extend(_card_for_analysis(a, date))
             seen = True
     return paragraphs
 
 
-def _card_for_analysis(a: dict) -> list[list]:
-    """Build per-ticker decision card paragraphs."""
+def _card_for_analysis(a: dict, date: str) -> list[list]:
+    """Build per-ticker decision card paragraphs.
+
+    ok / partial status: appends a 📄 完整分析 link row pointing at the web
+    viewer page. Failure statuses (timeout/error/incomplete/budget_exhausted)
+    do NOT get a link — no full report exists on disk and a dead link in 飞书
+    is worse than no link.
+    """
     status = a.get("status", "error")
     code = a.get("code", "?")
     name = a.get("name", "")
@@ -133,12 +145,18 @@ def _card_for_analysis(a: dict) -> list[list]:
     if status in ("ok", "partial"):
         decision = a.get("decision") or {}
         fundamentals = a.get("fundamentals") or {}
+        web_base = os.environ.get("TRADINGAGENTS_WEB_BASE_URL", _DEFAULT_WEB_BASE_URL).rstrip("/")
+        viewer_url = f"{web_base}/sentiment-scan/{date}/{code}"
         rows = [
             _parse_line_to_feishu_elements(f"{tier_emoji} {code} {name}", False),
             [{"tag": "text", "text": f"     {tier_label}：{rank_summary}"}],
             [{"tag": "text", "text": f"     💰 建议：{decision.get('action', '—')} ({decision.get('rating', '—')})"}],
             [{"tag": "text", "text": f"     📊 PE {_fmt_pe(fundamentals.get('pe_ttm'))} · 远期PE {_fmt_pe(fundamentals.get('pe_forward'))} · ROE {_fmt_roe(fundamentals.get('roe'))} · FCF {_fmt_fcf(fundamentals.get('fcf'), fundamentals.get('currency'))}"}],
             [{"tag": "text", "text": f"     💡 {decision.get('summary_1line', '—')}"}],
+            [
+                {"tag": "text", "text": "     📄 完整分析: "},
+                {"tag": "a", "text": "查看完整报告", "href": viewer_url},
+            ],
         ]
         return rows
 

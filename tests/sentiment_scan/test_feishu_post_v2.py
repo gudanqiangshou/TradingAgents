@@ -165,3 +165,85 @@ def test_zero_intersection_omits_decision_block(monkeypatch):
     assert "🌟" not in full
     # Mantra block still present
     assert "📋" in full
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: 完整分析 link row
+# ---------------------------------------------------------------------------
+
+def _find_link_elements(payload: dict, ticker: str) -> list[dict]:
+    """Return all element dicts with tag=a whose href contains the ticker."""
+    out: list[dict] = []
+    for paragraph in payload["content"]["post"]["zh_cn"]["content"]:
+        for el in paragraph:
+            if el.get("tag") == "a" and ticker in (el.get("href") or ""):
+                out.append(el)
+    return out
+
+
+def test_decision_card_includes_full_report_link(monkeypatch):
+    """ok-status cards MUST embed a clickable link to the web viewer."""
+    monkeypatch.delenv("TRADINGAGENTS_WEB_BASE_URL", raising=False)
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    payload = build_feishu_post(_make_snapshot(), "2026-05-27")
+    links = _find_link_elements(payload, "600519")
+    # Exactly one viewer link for 600519
+    viewer_links = [l for l in links if "/sentiment-scan/" in l["href"]]
+    assert len(viewer_links) == 1
+    link = viewer_links[0]
+    assert link["text"] == "查看完整报告"
+    assert link["href"] == "https://ta.nibajie.cc/sentiment-scan/2026-05-27/600519"
+
+    # partial status (300866) also gets the link
+    viewer_links_partial = _find_link_elements(payload, "300866")
+    assert any("/sentiment-scan/" in l["href"] for l in viewer_links_partial)
+
+
+def test_decision_card_link_uses_env_web_base_url(monkeypatch):
+    """TRADINGAGENTS_WEB_BASE_URL overrides the default https://ta.nibajie.cc."""
+    monkeypatch.setenv("TRADINGAGENTS_WEB_BASE_URL", "http://localhost:18000")
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    payload = build_feishu_post(_make_snapshot(), "2026-05-27")
+    viewer_links = [l for l in _find_link_elements(payload, "600519") if "/sentiment-scan/" in l["href"]]
+    assert len(viewer_links) == 1
+    assert viewer_links[0]["href"] == "http://localhost:18000/sentiment-scan/2026-05-27/600519"
+
+
+def test_failure_card_omits_full_report_link():
+    """timeout/error/incomplete/budget_exhausted cards do NOT include the link.
+
+    A dead link in 飞书 is worse than no link — full reports don't exist on
+    disk for these statuses."""
+    snap = _make_snapshot()
+    snap["analyses"] = [
+        {
+            "code": "TIMEOUT1", "name": "T1", "market": "A_SHARE",
+            "tier": "triple", "ranks": {"a": 1, "b": 1, "c": 1},
+            "fundamentals": None, "decision": None, "status": "timeout",
+            "elapsed_seconds": 1800, "error": "exceeded per-ticker deadline",
+        },
+        {
+            "code": "ERROR1", "name": "E1", "market": "A_SHARE",
+            "tier": "ab_only", "ranks": {"a": 2, "b": 2},
+            "fundamentals": None, "decision": None, "status": "error",
+            "elapsed_seconds": 5, "error": "RuntimeError: nope",
+        },
+        {
+            "code": "INCMP1", "name": "I1", "market": "A_SHARE",
+            "tier": "ac_only", "ranks": {"a": 3, "c": 3},
+            "fundamentals": None, "decision": None, "status": "incomplete",
+            "elapsed_seconds": 600, "error": "no final_trade_decision produced",
+        },
+        {
+            "code": "BUDG1", "name": "B1", "market": "A_SHARE",
+            "tier": "bc_only", "ranks": {"b": 4, "c": 4},
+            "fundamentals": None, "decision": None, "status": "budget_exhausted",
+            "elapsed_seconds": 0, "error": "global deadline reached",
+        },
+    ]
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    payload = build_feishu_post(snap, "2026-05-27")
+    # No viewer link for any of the 4 failure codes
+    for code in ("TIMEOUT1", "ERROR1", "INCMP1", "BUDG1"):
+        viewer_links = [l for l in _find_link_elements(payload, code) if "/sentiment-scan/" in l["href"]]
+        assert viewer_links == [], f"failure-status code {code} must not have viewer link"
