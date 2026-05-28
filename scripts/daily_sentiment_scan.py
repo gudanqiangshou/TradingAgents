@@ -688,6 +688,108 @@ def convert_to_feishu_post(markdown_report: str, curr_date: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# --analyze subcommand (new): scan + per-ticker analysis + JSON snapshot
+# ---------------------------------------------------------------------------
+
+from datetime import time as _time_cls
+
+from tradingagents.sentiment_scan.fundamentals_snapshot import fetch_structured_fundamentals
+from tradingagents.sentiment_scan.analysis_runner import run_batch
+from tradingagents.sentiment_scan.snapshot_io import save_snapshot, SCHEMA_VERSION
+
+
+def _default_snapshot_path(date: str) -> str:
+    base = os.environ.get(
+        "TRADINGAGENTS_SENTIMENT_SCAN_DIR",
+        os.path.expanduser("~/.tradingagents/sentiment-scan"),
+    )
+    return os.path.join(base, f"{date}.json")
+
+
+def _section_result_to_dict(sec) -> dict:
+    return {
+        "display": sec.display,
+        "top20_codes": list(sec.top20_codes),
+        "rank_by_code": dict(sec.rank_by_code),
+        "summary_by_code": dict(sec.summary_by_code),
+    }
+
+
+def _cmd_analyze(date: str, output_path: str) -> int:
+    """Run scan + per-ticker analysis, write JSON snapshot, return exit code."""
+    scan_started = datetime.now().strftime("%H:%M:%S")
+
+    sec_a = section_a_hot_up_rank()
+    sec_b = section_b_lhb(date)
+    sec_c = section_c_xueqiu_surge()
+    sec_d = section_d_stocktwits()
+    intersection = compute_intersection(sec_a, sec_b, sec_c)
+
+    scan_done = datetime.now().strftime("%H:%M:%S")
+
+    # Hard deadline: 8:50 today (push fires at 9:05 — leave 15 min buffer)
+    today_dt = datetime.strptime(date, "%Y-%m-%d")
+    hard_deadline = datetime.combine(today_dt.date(), _time_cls(8, 50))
+    # If running for tomorrow's date or after 8:50, give 2.5h from now.
+    if hard_deadline <= datetime.now():
+        hard_deadline = datetime.now() + timedelta(hours=2, minutes=30)
+
+    # Map tier per code (build rank dict per analysis result for snapshot).
+    tier_by_code: dict[str, str] = {}
+    ranks_by_code: dict[str, dict] = {}
+    for tier in ("triple", "ab_only", "ac_only", "bc_only"):
+        for code in intersection[tier]:
+            tier_by_code[code] = tier
+            ranks_by_code[code] = {
+                "a": sec_a.rank_by_code.get(code),
+                "b": sec_b.rank_by_code.get(code),
+                "c": sec_c.rank_by_code.get(code),
+            }
+
+    # Run batch analyses (TradingAgents).
+    batch_results = run_batch(intersection, date, hard_deadline)
+
+    # Per-ticker: fetch fundamentals + merge with batch result.
+    name_by_code = {c: sec_a.summary_by_code.get(c, "").split(" ")[0] for c in tier_by_code}
+    analyses = []
+    for r in batch_results:
+        code = r["ticker"]
+        fundamentals = fetch_structured_fundamentals(code)
+        analyses.append({
+            "code": code,
+            "name": name_by_code.get(code, ""),
+            "market": fundamentals.get("market", "A_SHARE"),
+            "tier": tier_by_code.get(code, "unknown"),
+            "ranks": ranks_by_code.get(code, {}),
+            "fundamentals": fundamentals,
+            "decision": r.get("decision"),
+            "status": r["status"],
+            "error": r.get("error"),
+            "elapsed_seconds": r.get("elapsed_seconds", 0),
+        })
+
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "date": date,
+        "scan_completed_at": scan_done,
+        "analysis_started_at": scan_done,
+        "analysis_completed_at": datetime.now().strftime("%H:%M:%S"),
+        "analysis_budget_exhausted": any(a["status"] == "budget_exhausted" for a in analyses),
+        "sections": {
+            "section_a": _section_result_to_dict(sec_a),
+            "section_b": _section_result_to_dict(sec_b),
+            "section_c": _section_result_to_dict(sec_c),
+            "section_d": _section_result_to_dict(sec_d),
+            "intersection": intersection,
+        },
+        "analyses": analyses,
+    }
+
+    save_snapshot(output_path, snapshot)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
