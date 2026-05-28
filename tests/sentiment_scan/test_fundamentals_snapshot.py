@@ -194,3 +194,65 @@ def test_hk_secid_format():
     assert _hk_secid("0700.HK") == "116.00700"
     assert _hk_secid("9988.HK") == "116.09988"     # 阿里
     assert _hk_secid("01024") == "116.01024"
+
+
+def test_yfinance_stub_dict_returns_error_deterministic():
+    """yfinance 对无效 ticker 返 {trailingPegRatio: None} truthy stub.
+    Sentinel-key 应拒识别 → outer try catches → status=error.
+    完全 mock 不打网络 — deterministic 测试 (replaces v1 plan 中真发 yahoo
+    HTTP 的 INVALID_NOT_A_TICKER parametrize case)."""
+    fake_ticker = MagicMock()
+    fake_ticker.info = {"trailingPegRatio": None}   # 真实 stub shape
+    with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot.yf.Ticker",
+        return_value=fake_ticker,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot.yf_retry",
+        side_effect=lambda fn: fn(),
+    ):
+        result = fetch_structured_fundamentals("FAKEXYZ")
+    assert result["status"] == "error"
+    assert ("stub" in result["error"]) or ("no recognized fields" in result["error"])
+    assert result["market"] == "US"   # market 在 error path 仍保留
+
+
+def test_yfinance_exception_returns_error_status():
+    with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot.yf.Ticker",
+        side_effect=RuntimeError("network down"),
+    ):
+        result = fetch_structured_fundamentals("AAPL")
+    assert result["status"] == "error"
+    assert "RuntimeError" in result["error"]
+    assert result["pe_ttm"] is None
+    assert result["market"] == "US"   # ground-truth: market preserved on error
+
+
+def test_a_share_eastmoney_failure_then_akshare_failure_returns_error_status():
+    """两个 vendor 都挂时 status=error 不抛."""
+    fake_session = MagicMock()
+    fake_session.get.side_effect = RuntimeError("eastmoney down")
+    fake_ak = MagicMock()
+    fake_ak.stock_financial_abstract.side_effect = RuntimeError("akshare down")
+    with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_session",
+        return_value=fake_session,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_http_retry",
+        side_effect=lambda fn: fn(),
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = fetch_structured_fundamentals("600519")
+    assert result["status"] == "error"
+    assert result["market"] == "A_SHARE"
+
+
+@pytest.mark.parametrize("bad", [None, "", [], 12345])
+def test_bad_inputs_never_throw(bad):
+    """非字符串/空串/list/int → status=error，不抛."""
+    result = fetch_structured_fundamentals(bad)  # type: ignore[arg-type]
+    assert isinstance(result, dict)
+    assert result["status"] == "error"
+    assert result["pe_ttm"] is None
