@@ -9,7 +9,7 @@
 
   Install:
     cp web/launchd/com.tradingagents.daily-analysis.plist ~/Library/LaunchAgents/
-    mkdir -p ~/.tradingagents/sentiment-scan
+    mkdir -p ~/.tradingagents/sentiment-scan ~/.tradingagents/logs
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-analysis.plist
 
   Test manually (out-of-cycle):

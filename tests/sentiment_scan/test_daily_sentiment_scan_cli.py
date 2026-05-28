@@ -144,6 +144,57 @@ def test_no_flags_default_path_unchanged(tmp_path, monkeypatch, capsys):
     assert "REPORT_PLACEHOLDER" in out  # current default writes to stdout
 
 
+def test_analyze_subcommand_name_fallback_for_bc_only_tier(tmp_path, monkeypatch):
+    """bc_only tier (龙虎 ∩ 雪球, NOT in 飙升榜) ticker name should come from
+    sec_b or sec_c summary_by_code, not be empty."""
+    from scripts.daily_sentiment_scan import _cmd_analyze
+
+    # Build sections such that 600000 is only in sec_b and sec_c (bc_only)
+    fake_sec_a = MagicMock(
+        display="A", top20_codes=["600519"],
+        rank_by_code={"600519": 1}, summary_by_code={"600519": "贵州茅台"},
+    )
+    fake_sec_b = MagicMock(
+        display="B", top20_codes=["600000"],
+        rank_by_code={"600000": 2}, summary_by_code={"600000": "浦发银行 · 净买入+1.2亿"},
+    )
+    fake_sec_c = MagicMock(
+        display="C", top20_codes=["600000"],
+        rank_by_code={"600000": 3}, summary_by_code={"600000": "浦发银行 本周#3"},
+    )
+    fake_sec_d = MagicMock(
+        display="D", top20_codes=[],
+        rank_by_code={}, summary_by_code={},
+    )
+
+    fake_fund = {
+        "pe_ttm": 5.0, "pe_forward": None, "fcf": None, "roe": 0.10,
+        "market_cap": 5e11, "currency": "CNY", "as_of": "2026-05-28",
+        "source": "akshare+eastmoney", "missing_fields": ["pe_forward", "fcf"],
+        "status": "partial",
+    }
+    fake_batch_result = [{
+        "ticker": "600000", "status": "ok",
+        "decision": {"rating": "Hold", "action": "HOLD", "summary_1line": "..."},
+        "error": None, "elapsed_seconds": 100,
+    }]
+
+    output = tmp_path / "snapshot.json"
+    with patch("scripts.daily_sentiment_scan.section_a_hot_up_rank", return_value=fake_sec_a), \
+         patch("scripts.daily_sentiment_scan.section_b_lhb", return_value=fake_sec_b), \
+         patch("scripts.daily_sentiment_scan.section_c_xueqiu_surge", return_value=fake_sec_c), \
+         patch("scripts.daily_sentiment_scan.section_d_stocktwits", return_value=fake_sec_d), \
+         patch("scripts.daily_sentiment_scan.fetch_structured_fundamentals", return_value=fake_fund), \
+         patch("scripts.daily_sentiment_scan.run_batch", return_value=fake_batch_result):
+        _cmd_analyze(date="2026-05-28", output_path=str(output))
+
+    data = json.loads(output.read_text())
+    assert data["sections"]["intersection"]["bc_only"] == ["600000"]
+    assert len(data["analyses"]) == 1
+    assert data["analyses"][0]["code"] == "600000"
+    assert data["analyses"][0]["name"] == "浦发银行"   # MUST not be empty
+
+
 def test_analyze_and_push_are_mutually_exclusive(monkeypatch):
     from scripts import daily_sentiment_scan as mod
     monkeypatch.setattr(mod.sys, "argv", ["s.py", "--analyze", "--push"])

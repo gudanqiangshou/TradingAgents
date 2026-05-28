@@ -15,6 +15,7 @@ placeholder but does NOT block the other sections.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import sys
@@ -22,6 +23,8 @@ from datetime import datetime, timedelta
 from typing import NamedTuple
 
 import pandas as pd
+
+_log = logging.getLogger(__name__)
 
 from tradingagents.dataflows.akshare_china import (
     fetch_hot_up_rank_data,
@@ -500,6 +503,19 @@ def compute_intersection(
     }
 
 
+def _name_from_sections(code: str, sec_a, sec_b, sec_c) -> str:
+    """Pick first available name from any section's summary_by_code.
+
+    bc_only tier codes (in 龙虎榜 ∩ 雪球, not in 飙升榜) have no entry in
+    sec_a.summary_by_code, so fall back through sec_b → sec_c.
+    """
+    for sec in (sec_a, sec_b, sec_c):
+        summary = sec.summary_by_code.get(code, "")
+        if summary:
+            return summary.split(" ")[0]
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Report builder
 # ---------------------------------------------------------------------------
@@ -665,11 +681,16 @@ def _cmd_analyze(date: str, output_path: str) -> int:
     batch_results = run_batch(intersection, date, hard_deadline)
 
     # Per-ticker: fetch fundamentals + merge with batch result.
-    name_by_code = {c: sec_a.summary_by_code.get(c, "").split(" ")[0] for c in tier_by_code}
+    name_by_code = {c: _name_from_sections(c, sec_a, sec_b, sec_c) for c in tier_by_code}
     analyses = []
     for r in batch_results:
         code = r["ticker"]
         fundamentals = fetch_structured_fundamentals(code)
+        if fundamentals.get("status") == "error":
+            _log.warning(
+                "fundamentals fetch failed for %s (market=%s): %s",
+                code, fundamentals.get("market"), fundamentals.get("error"),
+            )
         analyses.append({
             "code": code,
             "name": name_by_code.get(code, ""),
@@ -686,6 +707,7 @@ def _cmd_analyze(date: str, output_path: str) -> int:
     snapshot = {
         "schema_version": SCHEMA_VERSION,
         "date": date,
+        "scan_started_at": scan_started,
         "scan_completed_at": scan_done,
         "analysis_started_at": scan_done,
         "analysis_completed_at": datetime.now().strftime("%H:%M:%S"),

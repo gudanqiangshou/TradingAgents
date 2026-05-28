@@ -12,6 +12,7 @@
   1. Replace REPLACE_WITH_USER_WEBHOOK_URL with your 飞书 custom-bot webhook URL.
   2. Install:
        cp web/launchd/com.tradingagents.daily-feishu-push.plist ~/Library/LaunchAgents/
+       mkdir -p ~/.tradingagents/sentiment-scan ~/.tradingagents/logs
        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-feishu-push.plist
   3. Test manually (no webhook push):
        ./.venv/bin/python scripts/daily_sentiment_scan.py --no-feishu
