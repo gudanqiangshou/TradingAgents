@@ -170,6 +170,76 @@ def _fetch_a_share(ticker: str) -> dict:
     }
 
 
+def _hk_secid(ticker: str) -> str:
+    """HK secid: '116.' + 5-digit zero-padded code (4-digit must be zfilled)."""
+    raw = ticker.strip().upper()
+    if raw.endswith(".HK"):
+        raw = raw[:-3]
+    return f"116.{raw.zfill(5)}"
+
+
+def _hk_roe(code5: str) -> tuple[float | None, str]:
+    """Extract HK ROE (as ratio) + currency from akshare HK indicator endpoint.
+
+    ROE_AVG 单位是百分点 (e.g. 21.13) — divide by 100 to match ratio form
+    (US/A_SHARE both use ratio).
+    """
+    ak = _dep_bootstrap.ensure("akshare")
+    df = ak.stock_financial_hk_analysis_indicator_em(symbol=code5)
+    roe: float | None = None
+    currency = "HKD"
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        row = df.iloc[0]
+        for col in ("ROE_AVG", "ROE"):
+            if col in df.columns:
+                v = row.get(col)
+                if not pd.isna(v):
+                    try:
+                        roe = float(v) / 100.0      # 百分点 → ratio
+                    except (TypeError, ValueError):
+                        pass
+                    break
+        cur = row.get("CURRENCY")
+        if isinstance(cur, str) and cur.strip():
+            currency = cur
+    return roe, currency
+
+
+def _fetch_hk(ticker: str) -> dict:
+    raw = ticker.strip().upper()
+    if raw.endswith(".HK"):
+        raw = raw[:-3]
+    code5 = raw.zfill(5)
+    secid = _hk_secid(ticker)
+
+    quote = _eastmoney_quote(secid)
+    f163 = quote.get("f163")
+    pe_ttm = f163 / 100.0 if f163 and f163 > 0 else None
+    market_cap = quote.get("f116") or None
+
+    roe, currency = _hk_roe(code5)
+
+    values: dict[str, float | None] = {
+        "pe_ttm": pe_ttm,
+        "pe_forward": None,
+        "fcf": None,
+        "roe": roe,
+        "market_cap": market_cap,
+    }
+    missing, status = _fields_status(values)
+    return {
+        "ticker": f"{code5}.HK",
+        "market": "HK",
+        **values,
+        "currency": currency,
+        "as_of": datetime.now().strftime("%Y-%m-%d"),
+        "source": "akshare+eastmoney",
+        "missing_fields": missing,
+        "status": status,
+        "error": None,
+    }
+
+
 def fetch_structured_fundamentals(ticker: str) -> dict:
     """Public entry — never throws. status=error on any vendor failure.
 
@@ -194,7 +264,8 @@ def fetch_structured_fundamentals(ticker: str) -> dict:
             return _fetch_us(ticker)
         if m == Market.A_SHARE:
             return _fetch_a_share(ticker)
-        # HK branch added in subsequent task
+        if m == Market.HK:
+            return _fetch_hk(ticker)
         return _error_result(ticker, market_name, f"market {market_name} not yet supported")
     except Exception as exc:
         return _error_result(ticker, market_name, f"{type(exc).__name__}: {str(exc)[:200]}")

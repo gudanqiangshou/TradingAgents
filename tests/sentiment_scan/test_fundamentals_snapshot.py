@@ -135,3 +135,62 @@ def test_a_share_secid_prefix_mapping():
     assert _a_share_secid("200568") == "0.200568"    # SZ B 股
     assert _a_share_secid("430047") == "0.430047"    # BJ
     assert _a_share_secid("832000") == "0.832000"    # BJ
+
+
+def test_hk_extracts_pe_marketcap_roe_via_eastmoney(monkeypatch):
+    """HK: secid=116.{zfill5}, ROE_AVG ÷100 转 ratio."""
+    import pandas as pd
+
+    fake_quote_response = MagicMock(status_code=200)
+    fake_quote_response.json.return_value = {
+        "rc": 0,
+        "data": {
+            "f43": 421800,                        # 4218.00 HKD (×100)
+            "f57": "00700",
+            "f58": "腾讯控股",
+            "f116": 3_845_998_292_193.0,          # 3.85 万亿 HKD
+            "f163": 1711,                         # PE TTM 17.11
+            "f167": 301,
+        },
+    }
+    fake_session = MagicMock(get=MagicMock(return_value=fake_quote_response))
+
+    fake_df = pd.DataFrame([{
+        "REPORT_DATE": "2026-03-31",
+        "ROE_AVG": 21.13,                          # 百分点 - 需 ÷100
+        "CURRENCY": "HKD",
+    }])
+    fake_ak = MagicMock(
+        stock_financial_hk_analysis_indicator_em=MagicMock(return_value=fake_df),
+    )
+
+    with patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_session",
+        return_value=fake_session,
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._eastmoney_http_retry",
+        side_effect=lambda fn: fn(),
+    ), patch(
+        "tradingagents.sentiment_scan.fundamentals_snapshot._dep_bootstrap.ensure",
+        return_value=fake_ak,
+    ):
+        result = fetch_structured_fundamentals("0700.HK")
+
+    assert result["ticker"] == "00700.HK"
+    assert result["market"] == "HK"
+    assert result["pe_ttm"] == 17.11
+    assert result["pe_forward"] is None
+    assert result["fcf"] is None
+    assert result["roe"] == pytest.approx(0.2113, abs=1e-4)   # 21.13 / 100
+    assert result["market_cap"] == 3_845_998_292_193.0
+    assert result["currency"] == "HKD"
+    assert result["source"] == "akshare+eastmoney"
+
+
+def test_hk_secid_format():
+    from tradingagents.sentiment_scan.fundamentals_snapshot import _hk_secid
+    assert _hk_secid("0700") == "116.00700"        # 4-digit zero-pad
+    assert _hk_secid("00700") == "116.00700"
+    assert _hk_secid("0700.HK") == "116.00700"
+    assert _hk_secid("9988.HK") == "116.09988"     # 阿里
+    assert _hk_secid("01024") == "116.01024"
