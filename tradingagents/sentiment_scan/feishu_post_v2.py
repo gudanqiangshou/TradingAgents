@@ -45,11 +45,16 @@ def build_feishu_post(snapshot: dict, date: str) -> dict:
         paragraphs.append([{"tag": "text", "text": f"━━━━━━━━ {emoji_title} ━━━━━━━━"}])
         display = (snapshot.get("sections", {}).get(sec_key) or {}).get("display", "")
         in_stocktwits = sec_key == "section_d"
+        header_skipped = False
         for line in display.splitlines():
             if not line.strip():
                 continue
-            # Skip the original Top-5 emoji header — we replaced it.
-            if line.startswith(("🚀", "🐂", "📈", "🇺🇸")):
+            # Drop the first non-empty line (it's the section's original emoji header,
+            # which we replace with our own ━━━ header above). Robust to whatever
+            # emoji conventions the section uses — section_b uses 🐂 for BOTH header
+            # AND data rows, so a "startswith emoji" filter would drop data too.
+            if not header_skipped:
+                header_skipped = True
                 continue
             paragraphs.append(_parse_line_to_feishu_elements(line, in_stocktwits))
 

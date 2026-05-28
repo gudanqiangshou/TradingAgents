@@ -110,6 +110,50 @@ def test_fcf_cny_uses_yi_unit():
     assert "¥560.0亿" in full
 
 
+def test_each_section_data_rows_are_preserved(monkeypatch):
+    """Section_b 龙虎榜 (header AND data both 🐂-prefixed) must not be dropped
+    by the header-skip logic — caught a real bug in v1 where data rows were
+    silently filtered alongside the header."""
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+
+    snap = {
+        "schema_version": 1,
+        "date": "2026-05-28",
+        "scan_completed_at": "06:31:00",
+        "analysis_completed_at": "08:42:00",
+        "analysis_budget_exhausted": False,
+        "sections": {
+            "section_a": {
+                "display": "🚀 A 股关注度飙升榜 — Top 5\n🔥 SH600519 茅台 · 排名 #3",
+                "top20_codes": [], "rank_by_code": {}, "summary_by_code": {},
+            },
+            "section_b": {
+                "display": "🐂 A股 龙虎榜 — Top 5\n🐂 600519 茅台 · 净买入 +12.5亿\n🐂 300866 安克 · 净买入 +5.2亿",
+                "top20_codes": [], "rank_by_code": {}, "summary_by_code": {},
+            },
+            "section_c": {
+                "display": "📈 雪球飙升榜 — Top 5\n🔥 SH600519 茅台 · 本周#1",
+                "top20_codes": [], "rank_by_code": {}, "summary_by_code": {},
+            },
+            "section_d": {
+                "display": "🇺🇸 StockTwits 美股热议榜 — Top 5\n1. AAPL NASDAQ · Apple Inc",
+                "top20_codes": [], "rank_by_code": {}, "summary_by_code": {},
+            },
+            "intersection": {"triple": [], "ab_only": [], "ac_only": [], "bc_only": []},
+        },
+        "analyses": [],
+    }
+    payload = build_feishu_post(snap, "2026-05-28")
+    full = "\n".join("".join(e.get("text", "") for e in p) for p in payload["content"]["post"]["zh_cn"]["content"])
+
+    # Each section's data row must appear (a real regression: section_b lost all data due to 🐂 substring match)
+    assert "茅台 · 排名 #3" in full           # section_a data
+    assert "600519 茅台 · 净买入 +12.5亿" in full  # section_b data row #1
+    assert "300866 安克 · 净买入 +5.2亿" in full   # section_b data row #2
+    assert "茅台 · 本周#1" in full           # section_c data
+    assert "AAPL" in full                    # section_d data
+
+
 def test_zero_intersection_omits_decision_block(monkeypatch):
     """If analyses=[], the 🌟 block is entirely omitted."""
     snap = _make_snapshot()
