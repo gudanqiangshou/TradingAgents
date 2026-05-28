@@ -181,9 +181,9 @@ def test_run_batch_processes_triple_first_then_double():
 
     calls: list[str] = []
 
-    def fake_runner(ticker, date, deadline):
+    def fake_runner(ticker, date, deadline, report_dir=None):
         calls.append(ticker)
-        return {"ticker": ticker, "status": "ok", "decision": None, "error": None, "elapsed_seconds": 1.0}
+        return {"ticker": ticker, "status": "ok", "decision": None, "error": None, "elapsed_seconds": 1.0, "report_paths": {}}
 
     intersection = {
         "triple": ["TRP1"],
@@ -218,3 +218,136 @@ def test_run_batch_budget_exhausted_skips_remaining():
     assert len(results) == 2
     assert all(r["status"] == "budget_exhausted" for r in results)
     assert {r["ticker"] for r in results} == {"T1", "T2"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: full markdown persistence
+# ---------------------------------------------------------------------------
+
+def test_run_single_analysis_writes_markdown_when_report_dir_set(tmp_path):
+    """When report_dir is passed, all 5 non-empty markdown reports are
+    written under <report_dir>/<ticker>/ and report_paths is populated."""
+    from tradingagents.sentiment_scan.analysis_runner import run_single_analysis
+
+    fake_final_state = {
+        "fundamentals_report": "## FUND\n茅台估值合理",
+        "news_report": "## NEWS\n白酒板块利好",
+        "investment_plan": "## PLAN\n研究团队倾向超配",
+        "trader_investment_plan": "## TRADER\n小幅建仓",
+        "final_trade_decision": (
+            "**Rating**: Overweight\n\n"
+            "**Executive Summary**: 高端白酒龙头机构净买入背书\n"
+        ),
+    }
+    fake_graph = MagicMock()
+    fake_graph.graph.stream.return_value = iter([fake_final_state])
+    fake_graph.propagator.create_initial_state.return_value = {}
+    fake_graph.propagator.get_graph_args.return_value = {}
+
+    deadline = datetime.now() + timedelta(minutes=30)
+    with patch(
+        "tradingagents.sentiment_scan.analysis_runner.TradingAgentsGraph",
+        return_value=fake_graph,
+    ), patch(
+        "tradingagents.sentiment_scan.analysis_runner.apply_china_vendor_overlay"
+    ):
+        result = run_single_analysis(
+            "600519", "2026-05-27", deadline, report_dir=str(tmp_path),
+        )
+
+    assert result["status"] == "ok"
+    paths = result["report_paths"]
+    assert set(paths.keys()) == {
+        "fundamentals_report",
+        "news_report",
+        "investment_plan",
+        "trader_investment_plan",
+        "final_trade_decision",
+    }
+    # All paths are absolute and the files exist with expected content.
+    import os as _os
+    for key, p in paths.items():
+        assert _os.path.isabs(p), f"{key} path must be absolute"
+        with open(p, "r", encoding="utf-8") as fh:
+            assert fh.read() == fake_final_state[key]
+    # And they live under <tmp_path>/600519/.
+    assert (tmp_path / "600519" / "fundamentals_report.md").exists()
+    assert (tmp_path / "600519" / "news_report.md").exists()
+    assert (tmp_path / "600519" / "investment_plan.md").exists()
+    assert (tmp_path / "600519" / "trader_investment_plan.md").exists()
+    assert (tmp_path / "600519" / "final_trade_decision.md").exists()
+
+
+def test_run_single_analysis_no_report_dir_skips_disk_write(tmp_path):
+    """report_dir=None must NOT touch disk. report_paths={} in result."""
+    from tradingagents.sentiment_scan.analysis_runner import run_single_analysis
+
+    fake_final_state = {
+        "fundamentals_report": "FOO",
+        "news_report": "BAR",
+        "final_trade_decision": "**Rating**: Hold\n**Executive Summary**: ok\n",
+    }
+    fake_graph = MagicMock()
+    fake_graph.graph.stream.return_value = iter([fake_final_state])
+    fake_graph.propagator.create_initial_state.return_value = {}
+    fake_graph.propagator.get_graph_args.return_value = {}
+
+    deadline = datetime.now() + timedelta(minutes=30)
+    with patch(
+        "tradingagents.sentiment_scan.analysis_runner.TradingAgentsGraph",
+        return_value=fake_graph,
+    ), patch(
+        "tradingagents.sentiment_scan.analysis_runner.apply_china_vendor_overlay"
+    ):
+        result = run_single_analysis("600519", "2026-05-27", deadline)
+        # also try explicit None
+        result2 = run_single_analysis("600519", "2026-05-27", deadline, report_dir=None)
+
+    assert result["status"] == "ok"
+    assert result["report_paths"] == {}
+    assert result2["report_paths"] == {}
+    # tmp_path remains empty
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_run_single_analysis_disk_write_failure_logged_not_fatal(tmp_path, caplog):
+    """Disk error during report write must NOT crash: status=ok, paths={}."""
+    import logging
+
+    from tradingagents.sentiment_scan.analysis_runner import run_single_analysis
+
+    fake_final_state = {
+        "fundamentals_report": "FOO",
+        "final_trade_decision": "**Rating**: Hold\n**Executive Summary**: ok\n",
+    }
+    fake_graph = MagicMock()
+    fake_graph.graph.stream.return_value = iter([fake_final_state])
+    fake_graph.propagator.create_initial_state.return_value = {}
+    fake_graph.propagator.get_graph_args.return_value = {}
+
+    deadline = datetime.now() + timedelta(minutes=30)
+    # Simulate disk full: builtin open() raises OSError on the tmp file.
+    real_open = open
+
+    def flaky_open(path, *args, **kwargs):
+        if str(path).endswith(".tmp"):
+            raise OSError("simulated disk full")
+        return real_open(path, *args, **kwargs)
+
+    with patch(
+        "tradingagents.sentiment_scan.analysis_runner.TradingAgentsGraph",
+        return_value=fake_graph,
+    ), patch(
+        "tradingagents.sentiment_scan.analysis_runner.apply_china_vendor_overlay"
+    ), patch("builtins.open", side_effect=flaky_open):
+        caplog.set_level(logging.WARNING)
+        result = run_single_analysis(
+            "600519", "2026-05-27", deadline, report_dir=str(tmp_path),
+        )
+
+    # Analysis still succeeded — just no report paths.
+    assert result["status"] == "ok"
+    assert result["report_paths"] == {}
+    # At least one warning was logged.
+    assert any("failed to persist report" in r.message or "could not create" in r.message
+               for r in caplog.records)
