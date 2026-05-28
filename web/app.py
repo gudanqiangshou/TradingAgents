@@ -489,6 +489,11 @@ def _run_analysis_thread(
 # request like .../reports/..%2Fetc%2Fpasswd cannot escape the sandbox.
 # ---------------------------------------------------------------------------
 _SS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Codex C1: the previous regex `^[A-Za-z0-9.]{1,12}$` accepts `.` and `..`
+# because both chars are in the class — `..` survives validation and the
+# resolved path then escapes <reports>/<date>/<code> via the parent-dir
+# segment. _is_valid_code() below is the canonical check; the regex stays
+# as a cheap pre-filter for the truly invalid shapes.
 _SS_CODE_RE = re.compile(r"^[A-Za-z0-9.]{1,12}$")
 _SS_REPORT_NAME_WHITELIST = {
     "fundamentals_report",
@@ -497,6 +502,25 @@ _SS_REPORT_NAME_WHITELIST = {
     "trader_investment_plan",
     "final_trade_decision",
 }
+
+
+def _is_valid_code(code: str) -> bool:
+    """Reject path-traversal vectors that the loose regex would let through.
+
+    Closes the Codex C1 finding: `[A-Za-z0-9.]{1,12}` accepts `.` and `..`,
+    so a request like ``/api/.../<date>/%2E%2E/reports/<name>`` would be
+    decoded to ``..`` by FastAPI and then concatenated into a path that
+    escapes the per-ticker sandbox. This explicit check rejects any code
+    that is, starts with, or contains the dot-segments path framework would
+    interpret as a parent-dir reference, plus any code that starts with `/`.
+    """
+    if not _SS_CODE_RE.match(code):
+        return False
+    if code in (".", ".."):
+        return False
+    if code.startswith("..") or code.startswith("/") or code.startswith("."):
+        return False
+    return True
 
 
 def _sentiment_scan_dir() -> Path:
@@ -519,11 +543,15 @@ def get_sentiment_scan_date(date: str):
     snap_path = _sentiment_scan_dir() / f"{date}.json"
     if not snap_path.exists():
         raise HTTPException(status_code=404, detail="snapshot not found")
-    try:
-        snap = json.loads(snap_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        _log.warning("sentiment-scan snapshot %s unreadable: %s", snap_path, exc)
-        raise HTTPException(status_code=500, detail="snapshot unreadable")
+    # Codex M2: route via load_snapshot so a schema_version mismatch (e.g. a
+    # future v2 file) is rejected rather than silently served with stale shape.
+    from tradingagents.sentiment_scan.snapshot_io import load_snapshot
+    snap = load_snapshot(str(snap_path))
+    if snap is None:
+        raise HTTPException(
+            status_code=500,
+            detail="snapshot unreadable or schema mismatch",
+        )
     return {
         "date": snap.get("date"),
         "scan_completed_at": snap.get("scan_completed_at"),
@@ -549,16 +577,18 @@ def get_sentiment_scan_ticker(date: str, code: str):
     """Per-ticker metadata + decision + fundamentals (no report body)."""
     if not _SS_DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="invalid date format")
-    if not _SS_CODE_RE.match(code):
+    if not _is_valid_code(code):
         raise HTTPException(status_code=400, detail="invalid code format")
     snap_path = _sentiment_scan_dir() / f"{date}.json"
     if not snap_path.exists():
         raise HTTPException(status_code=404, detail="snapshot not found")
-    try:
-        snap = json.loads(snap_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        _log.warning("sentiment-scan snapshot %s unreadable: %s", snap_path, exc)
-        raise HTTPException(status_code=500, detail="snapshot unreadable")
+    from tradingagents.sentiment_scan.snapshot_io import load_snapshot
+    snap = load_snapshot(str(snap_path))
+    if snap is None:
+        raise HTTPException(
+            status_code=500,
+            detail="snapshot unreadable or schema mismatch",
+        )
     for a in snap.get("analyses", []):
         if a.get("code") == code:
             return a
@@ -570,16 +600,28 @@ def get_sentiment_scan_report(date: str, code: str, report_name: str):
     """Plain-text markdown body for one report section."""
     if not _SS_DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="invalid date format")
-    if not _SS_CODE_RE.match(code):
+    if not _is_valid_code(code):
         raise HTTPException(status_code=400, detail="invalid code format")
     if report_name not in _SS_REPORT_NAME_WHITELIST:
         raise HTTPException(
             status_code=400,
             detail=f"invalid report name (allowed: {sorted(_SS_REPORT_NAME_WHITELIST)})",
         )
+    # Defense-in-depth (Codex C1): even with _is_valid_code we resolve the
+    # path and re-check it stays under the per-date reports root. Symlinks
+    # or unicode tricks that pass the regex still cannot escape.
+    reports_root = (_sentiment_scan_dir() / "reports").resolve()
     report_path = (
         _sentiment_scan_dir() / "reports" / date / code / f"{report_name}.md"
     )
+    try:
+        resolved = report_path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=400, detail="invalid resolved path")
+    try:
+        resolved.relative_to(reports_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="path escapes reports root")
     if not report_path.exists():
         raise HTTPException(status_code=404, detail="report not found on disk")
     return Response(
@@ -593,7 +635,7 @@ def serve_sentiment_scan_viewer(date: str, code: str):
     """Serve the static HTML viewer; its JS pulls data from the API routes."""
     # Reject obviously malformed paths early; the API routes the JS calls
     # will re-validate before touching disk.
-    if not _SS_DATE_RE.match(date) or not _SS_CODE_RE.match(code):
+    if not _SS_DATE_RE.match(date) or not _is_valid_code(code):
         raise HTTPException(status_code=400, detail="invalid path")
     viewer_path = _REPO_ROOT / "web" / "frontend" / "sentiment-scan.html"
     if not viewer_path.exists():

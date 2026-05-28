@@ -120,6 +120,16 @@
 
   // Render the tab strip + initial body content once metadata + report_paths
   // are known. Clicking a tab fetches that one report's markdown.
+  //
+  // Codex C2: the metadata block is rebuilt with textContent / createTextNode
+  // ONLY — never innerHTML — because some fields (decision.summary_1line,
+  // meta.name) are LLM-derived and could carry HTML-shaped content (or
+  // future prompt injection). DOMPurify is only wired up for the markdown
+  // body; metadata bypassed it before this fix.
+  // Whitelist of legal action strings → badge CSS class. Anything outside
+  // the whitelist falls through to "neutral" so an attacker-controlled
+  // value can never set an arbitrary className.
+  var ACTION_BADGE_CLASS = { "BUY": "BUY", "SELL": "SELL", "HOLD": "HOLD" };
   function renderShell(meta) {
     titleEl.textContent = code + " " + (meta.name || "");
     var statusZh = ({
@@ -131,15 +141,28 @@
       "budget_exhausted": "未分析"
     })[meta.status] || meta.status;
     var decision = meta.decision || {};
-    var actionBadge = "";
-    if (decision.action) {
-      actionBadge = '<span class="badge ' + decision.action + '">' + decision.action + '</span>';
+
+    // Build the metadata line element-by-element using only safe DOM APIs.
+    while (metaEl.firstChild) metaEl.removeChild(metaEl.firstChild);
+    metaEl.appendChild(document.createTextNode(
+      date + " · " + tierLabel(meta.tier) + " · 状态：" + statusZh + " · "
+    ));
+    if (decision.rating) {
+      metaEl.appendChild(document.createTextNode("评级 " + decision.rating + " · "));
     }
-    metaEl.innerHTML =
-      date + " · " + tierLabel(meta.tier) + " · " +
-      "状态：" + statusZh + " · " +
-      (decision.rating ? "评级 " + decision.rating + " · " : "") +
-      actionBadge + (decision.summary_1line || "");
+    if (decision.action) {
+      var badge = document.createElement("span");
+      // className from a whitelist — never from user/LLM data.
+      var safeClass = ACTION_BADGE_CLASS[decision.action] || "neutral";
+      badge.className = "badge " + safeClass;
+      // textContent escapes HTML; even if decision.action is "<img onerror>"
+      // it appears as literal text, not as DOM.
+      badge.textContent = decision.action;
+      metaEl.appendChild(badge);
+    }
+    if (decision.summary_1line) {
+      metaEl.appendChild(document.createTextNode(decision.summary_1line));
+    }
 
     var f = meta.fundamentals || {};
     fundEl.textContent =

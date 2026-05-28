@@ -290,3 +290,96 @@ def test_viewer_js_is_reachable_via_static_mount(client):
     # Quick sanity on the contents
     assert "/api/sentiment-scan/" in resp.text
     assert "renderMarkdown" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# C1 — Path traversal hardening (Codex audit)
+# ---------------------------------------------------------------------------
+
+def test_code_param_dot_dot_url_encoded_is_rejected(client, tmp_path):
+    """%2E%2E in `code` is decoded by Starlette to `..` before the regex.
+
+    The original regex `^[A-Za-z0-9.]{1,12}$` accepts `..` because both
+    chars are in the character class. The fix rejects `..` (and any code
+    that starts with `..` or `/`) at the route boundary so a URL like
+    /api/sentiment-scan/<date>/%2E%2E/reports/<name> cannot resolve to
+    `<scan_dir>/reports/<date>/../<name>.md` and read above the sandbox.
+    """
+    # Plant a sentinel ABOVE the per-ticker dir (where a traversal would land)
+    sentinel_md = tmp_path / "reports" / "2026-06-01" / "sentinel.md"
+    sentinel_md.parent.mkdir(parents=True, exist_ok=True)
+    sentinel_md.write_text("SECRET — should never leak", encoding="utf-8")
+    # Also write a real per-code report so the sandboxed path resolves
+    _write_report(tmp_path, "2026-06-01", "600519", "fundamentals_report", "ok body")
+
+    # URL-encoded `..` for the code segment. If C1 is unfixed, the framework
+    # decodes %2E%2E to ".." which passes the loose regex, and the resolved
+    # path escapes to <reports>/<date>/../fundamentals_report.md.
+    resp = client.get(
+        "/api/sentiment-scan/2026-06-01/%2E%2E/reports/fundamentals_report"
+    )
+    assert resp.status_code != 200, "path traversal via %2E%2E in code accepted"
+    # The sentinel must NOT have leaked into the response
+    assert "SECRET" not in resp.text
+
+
+def test_code_param_single_dot_rejected(client, tmp_path):
+    """Single `.` is also a path-traversal vector (current dir reference)."""
+    _write_report(tmp_path, "2026-06-01", "600519", "fundamentals_report", "ok body")
+    resp = client.get("/api/sentiment-scan/2026-06-01/./reports/fundamentals_report")
+    assert resp.status_code != 200
+
+
+def test_code_param_slash_prefix_rejected(client, tmp_path):
+    """A code starting with `/` would resolve to an absolute path."""
+    # Per-path encoding — Starlette may treat raw `/` as a path separator and
+    # 404 us; with %2F it stays in the code segment. Both must be non-200.
+    resp = client.get(
+        "/api/sentiment-scan/2026-06-01/%2Fetc%2Fpasswd/reports/fundamentals_report"
+    )
+    assert resp.status_code != 200
+
+
+def test_get_ticker_route_also_rejects_dot_dot(client, tmp_path):
+    """The metadata route shares the regex; ensure it is hardened too."""
+    _write_snapshot(tmp_path, "2026-06-01")
+    resp = client.get("/api/sentiment-scan/2026-06-01/%2E%2E")
+    assert resp.status_code != 200
+
+
+def test_viewer_html_route_also_rejects_dot_dot(client):
+    """The viewer page route must reject `..` too — it shares the regex."""
+    resp = client.get("/sentiment-scan/2026-06-01/%2E%2E")
+    assert resp.status_code != 200
+
+
+# ---------------------------------------------------------------------------
+# M2 — Web routes must honour load_snapshot's schema_version check
+# ---------------------------------------------------------------------------
+
+def test_get_date_rejects_future_schema_version(client, tmp_path):
+    """A snapshot.json with schema_version=99 (e.g. future) must NOT be served.
+
+    Before M2, the route read JSON directly via `json.loads` and bypassed
+    `load_snapshot`'s validation. The viewer would then receive a shape
+    it doesn't understand.
+    """
+    future = {
+        "schema_version": 99,
+        "date": "2026-06-01",
+        "analyses": [{"code": "600519", "status": "ok"}],
+    }
+    (tmp_path / "2026-06-01.json").write_text(json.dumps(future), encoding="utf-8")
+    resp = client.get("/api/sentiment-scan/2026-06-01")
+    assert resp.status_code >= 400, "future schema_version must NOT be served as 200"
+
+
+def test_get_ticker_rejects_future_schema_version(client, tmp_path):
+    future = {
+        "schema_version": 99,
+        "date": "2026-06-01",
+        "analyses": [{"code": "600519", "status": "ok"}],
+    }
+    (tmp_path / "2026-06-01.json").write_text(json.dumps(future), encoding="utf-8")
+    resp = client.get("/api/sentiment-scan/2026-06-01/600519")
+    assert resp.status_code >= 400
