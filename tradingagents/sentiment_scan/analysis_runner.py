@@ -195,7 +195,13 @@ def run_batch(
 
     Tickers not reached before hard_deadline get status=budget_exhausted.
     `report_dir` (if set) is passed straight through to run_single_analysis.
+
+    Codex M1: coerce non-dict `intersection` to empty result. A None or
+    string here used to raise AttributeError from `.get(tier, [])`.
     """
+    if not isinstance(intersection, dict):
+        return []
+
     ordered: list[str] = []
     for tier in ("triple", "ab_only", "ac_only", "bc_only"):
         for code in intersection.get(tier, []):

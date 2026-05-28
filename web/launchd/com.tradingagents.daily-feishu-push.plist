@@ -15,7 +15,7 @@
        mkdir -p ~/.tradingagents/sentiment-scan ~/.tradingagents/logs
        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-feishu-push.plist
   3. Test manually (no webhook push):
-       ./.venv/bin/python scripts/daily_sentiment_scan.py --no-feishu
+       ./.venv/bin/python scripts/daily_sentiment_scan.py --push --no-feishu
   4. Unload:
        launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-feishu-push.plist
 -->

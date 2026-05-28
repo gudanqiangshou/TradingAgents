@@ -351,3 +351,31 @@ def test_run_single_analysis_disk_write_failure_logged_not_fatal(tmp_path, caplo
     # At least one warning was logged.
     assert any("failed to persist report" in r.message or "could not create" in r.message
                for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Codex M1 — run_batch must coerce a non-dict intersection to empty result
+# ---------------------------------------------------------------------------
+
+def test_run_batch_handles_non_dict_intersection_gracefully():
+    """`intersection=None` or any non-dict must return [], not raise.
+
+    Pre-fix, `intersection.get(tier, [])` raises AttributeError on None.
+    """
+    from datetime import datetime, timedelta
+    from tradingagents.sentiment_scan.analysis_runner import run_batch
+
+    deadline = datetime.now() + timedelta(minutes=5)
+    assert run_batch(None, "2026-05-28", deadline) == []
+    assert run_batch("not-a-dict", "2026-05-28", deadline) == []
+    assert run_batch(42, "2026-05-28", deadline) == []
+    assert run_batch([], "2026-05-28", deadline) == []
+
+
+def test_run_batch_empty_dict_returns_empty(monkeypatch):
+    """Sanity: an empty dict is a legal `intersection` (no tickers)."""
+    from datetime import datetime, timedelta
+    from tradingagents.sentiment_scan.analysis_runner import run_batch
+
+    deadline = datetime.now() + timedelta(minutes=5)
+    assert run_batch({}, "2026-05-28", deadline) == []
