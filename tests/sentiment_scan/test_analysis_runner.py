@@ -2,8 +2,6 @@
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 def test_happy_path_returns_ok_with_rating_and_action():
     """Mock graph stream returns a final_state with non-empty final_trade_decision.
@@ -31,6 +29,37 @@ def test_happy_path_returns_ok_with_rating_and_action():
     assert result["decision"]["rating"] == "Overweight"
     assert result["decision"]["action"] == "BUY"  # via SIGNAL_ACTION_MAP[Overweight]
     assert result["elapsed_seconds"] >= 0
+
+
+def test_summary_extracted_from_pm_markdown_format():
+    """PM 真实 markdown 输出 (with **bold** markers) → summary_1line 抽对."""
+    from tradingagents.sentiment_scan.analysis_runner import run_single_analysis
+
+    fake_final_state = {
+        "final_trade_decision": (
+            "**Rating**: Buy\n\n"
+            "**Executive Summary**: 收入增长强劲且自由现金流转正，估值仍合理\n\n"
+            "**Investment Thesis**: ..."
+        ),
+    }
+    fake_graph = MagicMock()
+    fake_graph.graph.stream.return_value = iter([fake_final_state])
+    fake_graph.propagator.create_initial_state.return_value = {}
+    fake_graph.propagator.get_graph_args.return_value = {}
+
+    deadline = datetime.now() + timedelta(minutes=30)
+    with patch(
+        "tradingagents.sentiment_scan.analysis_runner.TradingAgentsGraph",
+        return_value=fake_graph,
+    ), patch(
+        "tradingagents.sentiment_scan.analysis_runner.apply_china_vendor_overlay"
+    ):
+        result = run_single_analysis("AAPL", "2026-05-28", deadline)
+
+    assert result["status"] == "ok"
+    assert result["decision"]["rating"] == "Buy"
+    assert result["decision"]["action"] == "BUY"
+    assert result["decision"]["summary_1line"] == "收入增长强劲且自由现金流转正，估值仍合理"
 
 
 def test_deadline_exceeded_during_stream_returns_timeout():

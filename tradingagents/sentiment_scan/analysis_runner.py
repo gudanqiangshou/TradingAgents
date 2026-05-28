@@ -13,8 +13,7 @@ from __future__ import annotations
 import gc
 import re
 import time
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timedelta
 
 from tradingagents.agents.utils.rating import SIGNAL_ACTION_MAP
 from tradingagents.dataflows.akshare_china import apply_china_vendor_overlay
@@ -22,11 +21,20 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.signal_processing import SignalProcessor
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
+_SUMMARY_RE = re.compile(r"\*\*Executive Summary\*\*[：:\s]*([^\n]+)")
+_SINGLE_TICKER_BUDGET = timedelta(minutes=30)
+
 
 def run_single_analysis(ticker: str, date: str, deadline: datetime) -> dict:
     """Run TradingAgents (fundamentals + news) on one ticker.
 
     Returns a dict with at least `status` and (on ok/partial/incomplete) `decision`.
+
+    Watchdog granularity: deadline is checked BETWEEN langgraph chunks. A single
+    LLM call that hangs longer than the deadline is NOT interrupted — rely on the
+    LLM client's per-request timeout as the inner-layer guard. Spec accepts this
+    limitation; the 8:50 hard_deadline in run_batch provides the outer-layer
+    cap across the whole batch.
     """
     started_at = time.time()
     try:
@@ -83,9 +91,6 @@ def _result(ticker: str, status: str, started_at: float, *, decision: dict | Non
     }
 
 
-_SUMMARY_RE = re.compile(r"\*\*Executive Summary\*\*[：:\s]*([^\n]+)")
-
-
 def _extract_summary_1line(md: str) -> str:
     """First sentence of Executive Summary, or first non-empty rating line as fallback."""
     m = _SUMMARY_RE.search(md)
@@ -96,11 +101,6 @@ def _extract_summary_1line(md: str) -> str:
         if line and not line.lower().startswith("rating"):
             return line[:200]
     return ""
-
-
-from datetime import timedelta as _td
-
-_SINGLE_TICKER_BUDGET = _td(minutes=30)
 
 
 def run_batch(intersection: dict, date: str, hard_deadline: datetime) -> list[dict]:
