@@ -68,3 +68,63 @@ def test_analyze_subcommand_writes_json(tmp_path, monkeypatch):
     assert data["analyses"][0]["code"] == "600519"
     assert data["analyses"][0]["fundamentals"]["pe_ttm"] == 25.3
     assert data["analyses"][0]["status"] == "ok"
+
+
+def test_push_subcommand_reads_json_and_calls_webhook(tmp_path, monkeypatch):
+    from scripts.daily_sentiment_scan import _cmd_push
+
+    snap = {
+        "schema_version": 1,
+        "date": "2026-05-27",
+        "scan_completed_at": "06:31",
+        "analysis_completed_at": "08:42",
+        "sections": {
+            "section_a": {"display": "🚀 A股飙升榜\n🔥 SH600519 茅台", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}},
+            "section_b": {"display": "🐂 龙虎榜\n", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}},
+            "section_c": {"display": "📈 雪球\n", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}},
+            "section_d": {"display": "🇺🇸 ST\n", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}},
+            "intersection": {"triple": [], "ab_only": [], "ac_only": [], "bc_only": []},
+        },
+        "analyses": [],
+    }
+    snap_path = tmp_path / "2026-05-27.json"
+    snap_path.write_text(json.dumps(snap))
+
+    monkeypatch.setenv("TRADINGAGENTS_FEISHU_WEBHOOK", "https://example.test/hook")
+
+    mock_response = MagicMock(status_code=200, text='{"code":0}')
+    mock_response.json.return_value = {"code": 0}
+    with patch("requests.post", return_value=mock_response) as mock_post:
+        rc = _cmd_push(date="2026-05-27", input_path=str(snap_path), no_feishu=False)
+    assert rc == 0
+    assert mock_post.called
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["msg_type"] == "post"
+
+
+def test_push_with_no_feishu_skips_webhook(tmp_path, monkeypatch):
+    from scripts.daily_sentiment_scan import _cmd_push
+    snap = {"schema_version": 1, "date": "2026-05-27", "sections": {"section_a": {"display": "", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}}, "section_b": {"display": "", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}}, "section_c": {"display": "", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}}, "section_d": {"display": "", "top20_codes": [], "rank_by_code": {}, "summary_by_code": {}}, "intersection": {"triple": [], "ab_only": [], "ac_only": [], "bc_only": []}}, "analyses": []}
+    snap_path = tmp_path / "2026-05-27.json"
+    snap_path.write_text(json.dumps(snap))
+    monkeypatch.setenv("TRADINGAGENTS_FEISHU_WEBHOOK", "https://example.test/hook")
+    with patch("requests.post") as mock_post:
+        rc = _cmd_push(date="2026-05-27", input_path=str(snap_path), no_feishu=True)
+    assert rc == 0
+    assert not mock_post.called
+
+
+def test_push_with_missing_snapshot_sends_degraded_alert(tmp_path, monkeypatch):
+    from scripts.daily_sentiment_scan import _cmd_push
+    monkeypatch.setenv("TRADINGAGENTS_FEISHU_WEBHOOK", "https://example.test/hook")
+    nonexistent = str(tmp_path / "not-there.json")
+    mock_response = MagicMock(status_code=200, text='{"code":0}')
+    mock_response.json.return_value = {"code": 0}
+    with patch("requests.post", return_value=mock_response) as mock_post:
+        rc = _cmd_push(date="2026-05-27", input_path=nonexistent, no_feishu=False)
+    # Exit 0 but webhook called with a degraded-alert payload
+    assert rc == 0
+    assert mock_post.called
+    payload = mock_post.call_args.kwargs["json"]
+    text_blob = json.dumps(payload, ensure_ascii=False)
+    assert "未拿到分析快照" in text_blob or "snapshot" in text_blob.lower()

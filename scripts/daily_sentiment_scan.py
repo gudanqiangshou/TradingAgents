@@ -790,6 +790,54 @@ def _cmd_analyze(date: str, output_path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# --push subcommand (new): read JSON snapshot + push 飞书 post
+# ---------------------------------------------------------------------------
+
+from tradingagents.sentiment_scan.snapshot_io import load_snapshot
+from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+
+
+def _cmd_push(date: str, input_path: str, no_feishu: bool) -> int:
+    """Read snapshot JSON, build 飞书 post, push to webhook."""
+    snap = load_snapshot(input_path)
+    if snap is None:
+        payload = {
+            "msg_type": "post",
+            "content": {
+                "post": {
+                    "zh_cn": {
+                        "title": f"散户情绪扫盘 {date} — 降级告警",
+                        "content": [[{"tag": "text", "text": f"⚠️ 未拿到分析快照 ({input_path})。06:30 --analyze 可能未完成或被中止。"}]],
+                    }
+                }
+            },
+        }
+    else:
+        payload = build_feishu_post(snap, date)
+
+    if no_feishu:
+        return 0
+
+    webhook = os.environ.get("TRADINGAGENTS_FEISHU_WEBHOOK")
+    if not webhook:
+        print("[warning] TRADINGAGENTS_FEISHU_WEBHOOK not set; skipping push", file=sys.stderr)
+        return 0
+    try:
+        import requests
+        r = requests.post(webhook, json=payload, timeout=10)
+        resp_json = {}
+        try:
+            resp_json = r.json()
+        except Exception:
+            pass
+        if r.status_code != 200 or resp_json.get("code") != 0:
+            print(f"[warning] 飞书 webhook returned {r.status_code}: {r.text[:200]}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[warning] 飞书 push failed: {exc}", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
