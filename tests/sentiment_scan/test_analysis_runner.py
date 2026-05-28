@@ -144,3 +144,48 @@ def test_gc_collect_called_in_finally():
     ) as mock_gc:
         run_single_analysis("600519", "2026-05-27", deadline)
     assert mock_gc.called
+
+
+def test_run_batch_processes_triple_first_then_double():
+    """Tier order: triple → ab_only → ac_only → bc_only."""
+    from tradingagents.sentiment_scan.analysis_runner import run_batch
+
+    calls: list[str] = []
+
+    def fake_runner(ticker, date, deadline):
+        calls.append(ticker)
+        return {"ticker": ticker, "status": "ok", "decision": None, "error": None, "elapsed_seconds": 1.0}
+
+    intersection = {
+        "triple": ["TRP1"],
+        "ab_only": ["AB1", "AB2"],
+        "ac_only": ["AC1"],
+        "bc_only": ["BC1"],
+    }
+    hard_deadline = datetime.now() + timedelta(hours=2)
+    with patch(
+        "tradingagents.sentiment_scan.analysis_runner.run_single_analysis",
+        side_effect=fake_runner,
+    ):
+        results = run_batch(intersection, "2026-05-27", hard_deadline)
+
+    assert [r["ticker"] for r in results] == ["TRP1", "AB1", "AB2", "AC1", "BC1"]
+    assert calls == ["TRP1", "AB1", "AB2", "AC1", "BC1"]
+
+
+def test_run_batch_budget_exhausted_skips_remaining():
+    """If hard_deadline already passed, remaining tickers get status=budget_exhausted."""
+    from tradingagents.sentiment_scan.analysis_runner import run_batch
+
+    intersection = {"triple": ["T1", "T2"], "ab_only": [], "ac_only": [], "bc_only": []}
+    past = datetime.now() - timedelta(minutes=1)
+    with patch(
+        "tradingagents.sentiment_scan.analysis_runner.run_single_analysis",
+    ) as mock_run:
+        results = run_batch(intersection, "2026-05-27", past)
+
+    # Neither ticker should have been actually analyzed.
+    assert mock_run.call_count == 0
+    assert len(results) == 2
+    assert all(r["status"] == "budget_exhausted" for r in results)
+    assert {r["ticker"] for r in results} == {"T1", "T2"}

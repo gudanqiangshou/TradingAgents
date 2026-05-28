@@ -96,3 +96,35 @@ def _extract_summary_1line(md: str) -> str:
         if line and not line.lower().startswith("rating"):
             return line[:200]
     return ""
+
+
+from datetime import timedelta as _td
+
+_SINGLE_TICKER_BUDGET = _td(minutes=30)
+
+
+def run_batch(intersection: dict, date: str, hard_deadline: datetime) -> list[dict]:
+    """Run analyses across all intersection tickers in tier priority order.
+
+    Tickers not reached before hard_deadline get status=budget_exhausted.
+    """
+    ordered: list[str] = []
+    for tier in ("triple", "ab_only", "ac_only", "bc_only"):
+        for code in intersection.get(tier, []):
+            ordered.append(code)
+
+    results: list[dict] = []
+    for ticker in ordered:
+        if datetime.now() >= hard_deadline:
+            results.append({
+                "ticker": ticker,
+                "status": "budget_exhausted",
+                "decision": None,
+                "error": "global deadline reached before this ticker",
+                "elapsed_seconds": 0,
+            })
+            continue
+        per_ticker_deadline = min(datetime.now() + _SINGLE_TICKER_BUDGET, hard_deadline)
+        result = run_single_analysis(ticker, date, per_ticker_deadline)
+        results.append(result)
+    return results
