@@ -59,3 +59,65 @@ def test_section_order_is_4_top5_then_intersection():
     pos_intersection = full.find("🌟")
     pos_mantra = full.find("📋")
     assert pos_a < pos_b < pos_c < pos_d < pos_intersection < pos_mantra
+
+
+def test_timeout_ticker_shows_warning_card():
+    snap = _make_snapshot()
+    snap["analyses"].append({
+        "code": "002230", "name": "科大讯飞", "market": "A_SHARE",
+        "tier": "bc_only", "ranks": {"b": 3, "c": 4},
+        "fundamentals": None, "decision": None, "status": "timeout",
+        "elapsed_seconds": 1800, "error": "exceeded per-ticker deadline",
+    })
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    payload = build_feishu_post(snap, "2026-05-27")
+    full = "\n".join("".join(e.get("text", "") for e in p) for p in payload["content"]["post"]["zh_cn"]["content"])
+    assert "⚠ 002230 科大讯飞 — 分析超时" in full
+    assert "龙虎榜#3" in full and "雪球飙升#4" in full
+
+
+def test_error_ticker_shows_truncated_error():
+    snap = _make_snapshot()
+    long_err = "X" * 500
+    snap["analyses"].append({
+        "code": "888888", "name": "test", "market": "A_SHARE",
+        "tier": "ab_only", "ranks": {"a": 9, "b": 9},
+        "fundamentals": None, "decision": None, "status": "error",
+        "elapsed_seconds": 5, "error": long_err,
+    })
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    payload = build_feishu_post(snap, "2026-05-27")
+    full = "\n".join("".join(e.get("text", "") for e in p) for p in payload["content"]["post"]["zh_cn"]["content"])
+    assert "分析失败" in full
+    # Truncated to 80 chars
+    assert full.count("X") <= 80
+
+
+def test_roe_is_percent_not_decimal():
+    """ROE 0.308 should render as 30.8%, not 0.308."""
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    payload = build_feishu_post(_make_snapshot(), "2026-05-27")
+    full = "\n".join("".join(e.get("text", "") for e in p) for p in payload["content"]["post"]["zh_cn"]["content"])
+    assert "30.8%" in full
+    assert "0.308" not in full
+
+
+def test_fcf_cny_uses_yi_unit():
+    """FCF 5.6e10 with CNY currency renders as ¥560.0亿 (not raw number)."""
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    payload = build_feishu_post(_make_snapshot(), "2026-05-27")
+    full = "\n".join("".join(e.get("text", "") for e in p) for p in payload["content"]["post"]["zh_cn"]["content"])
+    assert "¥560.0亿" in full
+
+
+def test_zero_intersection_omits_decision_block(monkeypatch):
+    """If analyses=[], the 🌟 block is entirely omitted."""
+    snap = _make_snapshot()
+    snap["analyses"] = []
+    snap["sections"]["intersection"] = {"triple": [], "ab_only": [], "ac_only": [], "bc_only": []}
+    from tradingagents.sentiment_scan.feishu_post_v2 import build_feishu_post
+    payload = build_feishu_post(snap, "2026-05-27")
+    full = "\n".join("".join(e.get("text", "") for e in p) for p in payload["content"]["post"]["zh_cn"]["content"])
+    assert "🌟" not in full
+    # Mantra block still present
+    assert "📋" in full
