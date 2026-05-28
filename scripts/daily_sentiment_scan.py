@@ -480,6 +480,26 @@ def section_e_intersection(
     return "\n".join(lines)
 
 
+def compute_intersection(
+    sec_a: SectionResult, sec_b: SectionResult, sec_c: SectionResult,
+) -> dict:
+    """Structured intersection result for snapshot JSON / analysis dispatch.
+
+    Returns dict with 4 tier keys: triple, ab_only, ac_only, bc_only.
+    Each value is a sorted list of bare 6-digit A-share codes.
+    """
+    set_a = set(sec_a.top20_codes)
+    set_b = set(sec_b.top20_codes)
+    set_c = set(sec_c.top20_codes)
+    triple = set_a & set_b & set_c
+    return {
+        "triple": sorted(triple),
+        "ab_only": sorted((set_a & set_b) - set_c),
+        "ac_only": sorted((set_a & set_c) - set_b),
+        "bc_only": sorted((set_b & set_c) - set_a),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Report builder
 # ---------------------------------------------------------------------------
