@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import hmac
+import json
 import logging
 import os
 import re
@@ -470,6 +471,138 @@ def _run_analysis_thread(
         # The ONLY place the single-job slot is freed: guarantees it stays
         # held until this worker actually exits, even on watchdog timeout.
         job_mgr.release(job_id)
+
+
+# ---------------------------------------------------------------------------
+# Sentiment-scan history viewer (Phase 10)
+#
+# Backend has been writing per-ticker markdown reports to
+#   ~/.tradingagents/sentiment-scan/reports/<DATE>/<code>/<name>.md
+# since the analysis_runner gained `report_dir`. These four routes expose
+# them as JSON + a static viewer HTML page. The 飞书 decision cards link
+# to /sentiment-scan/<DATE>/<code>; that page's JS fetches the API routes
+# below. Everything is UNGATED (no password) — past sentiment snapshots are
+# considered shareable, and per-job streaming auth is unrelated.
+#
+# Security: every path param is validated against a strict regex BEFORE we
+# touch the filesystem. report_name is also whitelisted so a malicious
+# request like .../reports/..%2Fetc%2Fpasswd cannot escape the sandbox.
+# ---------------------------------------------------------------------------
+_SS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SS_CODE_RE = re.compile(r"^[A-Za-z0-9.]{1,12}$")
+_SS_REPORT_NAME_WHITELIST = {
+    "fundamentals_report",
+    "news_report",
+    "investment_plan",
+    "trader_investment_plan",
+    "final_trade_decision",
+}
+
+
+def _sentiment_scan_dir() -> Path:
+    """Filesystem root for sentiment-scan snapshots + per-day reports.
+
+    Matches the CLI's `TRADINGAGENTS_SENTIMENT_SCAN_DIR` env-var pivot so a
+    relocated SCAN_DIR is read consistently from both writer and viewer.
+    """
+    return Path(os.environ.get(
+        "TRADINGAGENTS_SENTIMENT_SCAN_DIR",
+        os.path.expanduser("~/.tradingagents/sentiment-scan"),
+    ))
+
+
+@app.get("/api/sentiment-scan/{date}")
+def get_sentiment_scan_date(date: str):
+    """List of analyses for a given date (without the full report bodies)."""
+    if not _SS_DATE_RE.match(date):
+        raise HTTPException(status_code=400, detail="invalid date format")
+    snap_path = _sentiment_scan_dir() / f"{date}.json"
+    if not snap_path.exists():
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    try:
+        snap = json.loads(snap_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning("sentiment-scan snapshot %s unreadable: %s", snap_path, exc)
+        raise HTTPException(status_code=500, detail="snapshot unreadable")
+    return {
+        "date": snap.get("date"),
+        "scan_completed_at": snap.get("scan_completed_at"),
+        "analysis_completed_at": snap.get("analysis_completed_at"),
+        "analyses": [
+            {
+                "code": a.get("code"),
+                "name": a.get("name"),
+                "market": a.get("market"),
+                "tier": a.get("tier"),
+                "status": a.get("status"),
+                "decision": a.get("decision"),
+                "fundamentals": a.get("fundamentals"),
+                "report_paths": a.get("report_paths", {}),
+            }
+            for a in snap.get("analyses", [])
+        ],
+    }
+
+
+@app.get("/api/sentiment-scan/{date}/{code}")
+def get_sentiment_scan_ticker(date: str, code: str):
+    """Per-ticker metadata + decision + fundamentals (no report body)."""
+    if not _SS_DATE_RE.match(date):
+        raise HTTPException(status_code=400, detail="invalid date format")
+    if not _SS_CODE_RE.match(code):
+        raise HTTPException(status_code=400, detail="invalid code format")
+    snap_path = _sentiment_scan_dir() / f"{date}.json"
+    if not snap_path.exists():
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    try:
+        snap = json.loads(snap_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning("sentiment-scan snapshot %s unreadable: %s", snap_path, exc)
+        raise HTTPException(status_code=500, detail="snapshot unreadable")
+    for a in snap.get("analyses", []):
+        if a.get("code") == code:
+            return a
+    raise HTTPException(status_code=404, detail="ticker not found in this date's snapshot")
+
+
+@app.get("/api/sentiment-scan/{date}/{code}/reports/{report_name}")
+def get_sentiment_scan_report(date: str, code: str, report_name: str):
+    """Plain-text markdown body for one report section."""
+    if not _SS_DATE_RE.match(date):
+        raise HTTPException(status_code=400, detail="invalid date format")
+    if not _SS_CODE_RE.match(code):
+        raise HTTPException(status_code=400, detail="invalid code format")
+    if report_name not in _SS_REPORT_NAME_WHITELIST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid report name (allowed: {sorted(_SS_REPORT_NAME_WHITELIST)})",
+        )
+    report_path = (
+        _sentiment_scan_dir() / "reports" / date / code / f"{report_name}.md"
+    )
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="report not found on disk")
+    return Response(
+        content=report_path.read_text(encoding="utf-8"),
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
+@app.get("/sentiment-scan/{date}/{code}", include_in_schema=False)
+def serve_sentiment_scan_viewer(date: str, code: str):
+    """Serve the static HTML viewer; its JS pulls data from the API routes."""
+    # Reject obviously malformed paths early; the API routes the JS calls
+    # will re-validate before touching disk.
+    if not _SS_DATE_RE.match(date) or not _SS_CODE_RE.match(code):
+        raise HTTPException(status_code=400, detail="invalid path")
+    viewer_path = _REPO_ROOT / "web" / "frontend" / "sentiment-scan.html"
+    if not viewer_path.exists():
+        raise HTTPException(status_code=500, detail="viewer not built")
+    return Response(
+        content=viewer_path.read_text(encoding="utf-8"),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 _FRONTEND_DIR = _REPO_ROOT / "web" / "frontend"
