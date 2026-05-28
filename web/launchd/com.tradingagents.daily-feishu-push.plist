@@ -3,24 +3,30 @@
 <!--
   TEMPLATE — do NOT load this file as-is.
 
+  Second half of the bipartite daily scan design:
+    - daily-analysis (06:30 Mon-Fri) runs --analyze and writes
+      ~/.tradingagents/sentiment-scan/<DATE>.json (single-stock TradingAgents graphs).
+    - daily-feishu-push (this plist, 09:05 Mon-Fri) runs --push which reads
+      that JSON snapshot and posts the formatted 飞书 message.
+
   1. Replace REPLACE_WITH_USER_WEBHOOK_URL with your 飞书 custom-bot webhook URL.
   2. Install:
-       cp web/launchd/com.tradingagents.daily-sentiment-scan.plist ~/Library/LaunchAgents/
-       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-sentiment-scan.plist
+       cp web/launchd/com.tradingagents.daily-feishu-push.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-feishu-push.plist
   3. Test manually (no webhook push):
        ./.venv/bin/python scripts/daily_sentiment_scan.py --no-feishu
   4. Unload:
-       launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-sentiment-scan.plist
+       launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tradingagents.daily-feishu-push.plist
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.tradingagents.daily-sentiment-scan</string>
+    <string>com.tradingagents.daily-feishu-push</string>
     <key>ProgramArguments</key>
     <array>
         <string>/Users/a1/TradingAgents/.venv/bin/python</string>
         <string>/Users/a1/TradingAgents/scripts/daily_sentiment_scan.py</string>
-        <string>--feishu-only</string>
+        <string>--push</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/a1/TradingAgents</string>
@@ -38,9 +44,9 @@
         <string>REPLACE_WITH_USER_WEBHOOK_URL</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/a1/.tradingagents/logs/daily-sentiment-scan-stdout.log</string>
+    <string>/Users/a1/.tradingagents/logs/daily-feishu-push-stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/a1/.tradingagents/logs/daily-sentiment-scan-stderr.log</string>
+    <string>/Users/a1/.tradingagents/logs/daily-feishu-push-stderr.log</string>
     <key>RunAtLoad</key>
     <false/>
 </dict>
