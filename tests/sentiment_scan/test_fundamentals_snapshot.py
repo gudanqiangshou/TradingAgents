@@ -57,10 +57,13 @@ def test_a_share_extracts_pe_marketcap_roe_via_eastmoney(monkeypatch):
     fake_session = MagicMock()
     fake_session.get.return_value = fake_quote_response
 
+    # akshare returns ROE as percent-points (e.g. 31 means 31% — confirmed
+    # empirically against 600726 returning 13.21 for a 13.21% ROE).
+    # fundamentals_snapshot._a_share_roe divides by 100 to convert to ratio.
     fake_df = pd.DataFrame({
         "指标": ["净利润", "净资产收益率(ROE)", "摊薄净资产收益率", "营业总收入"],
-        "20260331": [8.5e9, 0.31, 0.29, 5.5e10],
-        "20251231": [8.2e9, 0.30, 0.28, 5.3e10],
+        "20260331": [8.5e9, 31.0, 29.0, 5.5e10],   # ROE 31% as raw percent-points
+        "20251231": [8.2e9, 30.0, 28.0, 5.3e10],
     })
     fake_ak = MagicMock()
     fake_ak.stock_financial_abstract.return_value = fake_df
@@ -106,7 +109,8 @@ def test_a_share_eastmoney_zero_pe_treated_as_none(monkeypatch):
         },
     }
     fake_session = MagicMock(get=MagicMock(return_value=fake_quote_response))
-    fake_df = pd.DataFrame({"指标": ["净资产收益率(ROE)"], "20260331": [-0.05]})
+    # Vendor returns percent-points; -5 → ratio -0.05
+    fake_df = pd.DataFrame({"指标": ["净资产收益率(ROE)"], "20260331": [-5.0]})
     fake_ak = MagicMock(stock_financial_abstract=MagicMock(return_value=fake_df))
 
     with patch(

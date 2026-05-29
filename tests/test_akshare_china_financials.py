@@ -364,12 +364,14 @@ class TestGetBalanceSheet:
         assert len(csv_lines) > 1
 
     @pytest.mark.unit
-    def test_symbol_normalization_bare_code_passed_to_akshare(self):
+    def test_symbol_normalization_passes_exchange_prefixed_form(self):
+        """eastmoney *_by_report_em endpoints require SH/SZ/BJ-prefixed form.
+        Wrapper strips Yahoo-style suffix from input, then re-prefixes."""
         ak = _fake_ak_with_all()
         with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
             _vendor_mod.get_balance_sheet("600519.SH")
         call_kwargs = ak.stock_balance_sheet_by_report_em.call_args[1]
-        assert call_kwargs["symbol"] == "600519"
+        assert call_kwargs["symbol"] == "SH600519"
 
     @pytest.mark.unit
     def test_empty_df_returns_exact_no_data_message(self):
@@ -447,12 +449,12 @@ class TestGetBalanceSheet:
 
     @pytest.mark.unit
     def test_bj_suffix_normalized(self):
-        """BJ (Beijing exchange) suffix should be stripped to bare 6-digit code."""
+        """BJ (Beijing exchange) suffix is stripped, then BJ-prefixed for the endpoint."""
         ak = _fake_ak_with_all()
         with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
             _vendor_mod.get_balance_sheet("430047.BJ")
         call_kwargs = ak.stock_balance_sheet_by_report_em.call_args[1]
-        assert call_kwargs["symbol"] == "430047"
+        assert call_kwargs["symbol"] == "BJ430047"
 
 
 # ---------------------------------------------------------------------------
@@ -476,12 +478,13 @@ class TestGetCashflow:
         assert len(csv_lines) > 1
 
     @pytest.mark.unit
-    def test_symbol_normalization_bare_code_passed_to_akshare(self):
+    def test_symbol_normalization_passes_exchange_prefixed_form(self):
+        """eastmoney *_by_report_em endpoints require SH/SZ/BJ-prefixed form."""
         ak = _fake_ak_with_all()
         with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
             _vendor_mod.get_cashflow("600519.SH")
         call_kwargs = ak.stock_cash_flow_sheet_by_report_em.call_args[1]
-        assert call_kwargs["symbol"] == "600519"
+        assert call_kwargs["symbol"] == "SH600519"
 
     @pytest.mark.unit
     def test_empty_df_returns_exact_no_data_message(self):
@@ -563,12 +566,13 @@ class TestGetIncomeStatement:
         assert len(csv_lines) > 1
 
     @pytest.mark.unit
-    def test_symbol_normalization_bare_code_passed_to_akshare(self):
+    def test_symbol_normalization_passes_exchange_prefixed_form(self):
+        """eastmoney *_by_report_em endpoints require SH/SZ/BJ-prefixed form."""
         ak = _fake_ak_with_all()
         with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
             _vendor_mod.get_income_statement("600519.SH")
         call_kwargs = ak.stock_profit_sheet_by_report_em.call_args[1]
-        assert call_kwargs["symbol"] == "600519"
+        assert call_kwargs["symbol"] == "SH600519"
 
     @pytest.mark.unit
     def test_empty_df_returns_exact_no_data_message(self):
@@ -630,12 +634,12 @@ class TestGetIncomeStatement:
 
     @pytest.mark.unit
     def test_ss_suffix_normalized(self):
-        """SS (Shanghai alternate) suffix should be stripped."""
+        """SS (Shanghai alternate) suffix is stripped, then SH-prefixed for the endpoint."""
         ak = _fake_ak_with_all()
         with patch("tradingagents.dataflows.akshare_china._dep_bootstrap.ensure", return_value=ak):
             _vendor_mod.get_income_statement("600519.SS")
         call_kwargs = ak.stock_profit_sheet_by_report_em.call_args[1]
-        assert call_kwargs["symbol"] == "600519"
+        assert call_kwargs["symbol"] == "SH600519"
 
 
 # ---------------------------------------------------------------------------

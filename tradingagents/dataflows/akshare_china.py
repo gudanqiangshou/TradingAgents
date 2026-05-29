@@ -655,9 +655,15 @@ def _financial_statement(
     except _dep_bootstrap.DependencyUnavailable as exc:
         return f"Error: A-share data source unavailable ({exc})"
 
+    # The eastmoney *_by_report_em endpoints require the exchange-prefixed
+    # form (SH600519 / SZ000001 / BJ430047). Passing the bare 6-digit code
+    # makes akshare's internal lookup return None → 'NoneType is not
+    # subscriptable' error in the analyst's tool result, which is the
+    # "技术问题" the LLM complains about in its report intro.
+    prefixed = _eastmoney_a_share_symbol(code)
     try:
         method = getattr(ak, ak_method_name)
-        df = method(symbol=code)
+        df = method(symbol=prefixed)
     except Exception as exc:
         return f"Error: failed to fetch {error_kind} for {ticker}: {exc}"
 

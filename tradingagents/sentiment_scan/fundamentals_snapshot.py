@@ -120,12 +120,19 @@ def _eastmoney_quote(secid: str) -> dict:
 
 
 def _a_share_roe(code: str) -> float | None:
-    """Extract A-share ROE from akshare.stock_financial_abstract.
+    """Extract A-share ROE from akshare.stock_financial_abstract as a ratio.
 
     Strategy: EXACT-MATCH row 指标 == "净资产收益率(ROE)" (NOT substring;
     avoid colliding with "摊薄净资产收益率" / "净资产收益率_平均_扣除非经常损益"
     / "净资产收益率_平均" / "摊薄净资产收益率_扣除非经常损益").
     Take the value from the latest 8-digit-period column.
+
+    **Unit**: akshare returns percent-points (e.g. 13.21 means 13.21%) — divide
+    by 100 to match the ratio convention used by HK (ROE_AVG ÷ 100) and by
+    yfinance (returnOnEquity returned as ratio). Confirmed empirically against
+    600726 (13.21%), 600519 (typical 30%+), 000636 (~0.7% reverse-from-loss).
+    Earlier Phase 2 v2 assumed ratio form based on a misread of small-magnitude
+    quarterly values from loss-makers; corrected here.
     """
     ak = _dep_bootstrap.ensure("akshare")
     df = ak.stock_financial_abstract(symbol=code)
@@ -141,7 +148,7 @@ def _a_share_roe(code: str) -> float | None:
             if pd.isna(val):
                 continue
             try:
-                return float(val)
+                return float(val) / 100.0   # 百分点 → ratio
             except (TypeError, ValueError):
                 return None
     return None
